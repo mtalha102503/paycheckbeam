@@ -495,9 +495,9 @@ export default function PaycheckCalculator({ defaultStateSlug }: Props) {
       key: "state",
       label: state ? `${state.state} state tax` : "State tax",
       value:
-        result.perPeriodState === null
+        result.annualState === null
           ? null
-          : formatUSD(val(result.perPeriodState, result.annualState ?? 0)),
+          : formatUSD(val(result.perPeriodState ?? 0, result.annualState)),
       pct: pctOfGross(result.annualState),
       kind: "tax",
       note: stateApproximate
@@ -593,7 +593,7 @@ export default function PaycheckCalculator({ defaultStateSlug }: Props) {
         value: result.annualSocialSecurity + result.annualMedicare,
         color: "#d97706",
       },
-      { label: "State tax", value: result.annualState ?? 0, color: "#ea580c" },
+      { label: "State tax", value: result.annualState, color: "#ea580c" },
       {
         label: "State insurance",
         value: result.annualStateInsurance,
@@ -602,7 +602,10 @@ export default function PaycheckCalculator({ defaultStateSlug }: Props) {
       { label: "Local tax", value: result.annualLocal ?? 0, color: "#0ea5e9" },
       { label: "Pre-tax deductions", value: result.annualPreTax, color: "#64748b" },
       { label: "Post-tax deductions", value: result.annualPostTax, color: "#94a3b8" },
-    ].filter((s) => s.value > 0);
+    ].filter(
+      (s): s is { label: string; value: number; color: string } =>
+        s.value !== null && s.value > 0,
+    );
     const r = 52;
     const c = 2 * Math.PI * r;
     let offset = 0;
@@ -1163,12 +1166,21 @@ export default function PaycheckCalculator({ defaultStateSlug }: Props) {
                   </div>
                 </div>
 
-                {stateUnavailable && (
+                {stateUnavailable && !result.hohUnsupported && (
                   <div className="mt-4 rounded-xl border border-amber-400/40 bg-amber-400/10 px-4 py-3 text-sm text-amber-200">
                     <strong>State estimate coming soon.</strong> We are verifying the
                     official 2026 {state?.state} brackets with the state Department of
                     Revenue. The figures below show federal taxes only — your actual
                     take-home pay will be lower once state withholding is included.
+                  </div>
+                )}
+
+                {result.hohUnsupported && (
+                  <div className="mt-4 rounded-xl border border-amber-400/40 bg-amber-400/10 px-4 py-3 text-sm text-amber-200">
+                    <strong>Head of Household state estimate not available for {state?.state}.</strong> The
+                    state tax line is shown as unavailable — the single-filer figure is not
+                    used for head-of-household filers here. Federal tax, Social Security,
+                    and Medicare above are still calculated.
                   </div>
                 )}
 
@@ -1219,6 +1231,22 @@ export default function PaycheckCalculator({ defaultStateSlug }: Props) {
                           </span>
                         </li>
                       ))}
+                      {stateUnavailable && (
+                        <li className="flex items-center gap-2.5">
+                          <span
+                            className="h-2.5 w-2.5 shrink-0 rounded-full"
+                            style={{ backgroundColor: "#ea580c" }}
+                            aria-hidden="true"
+                          />
+                          <span className="text-slate-300">State tax</span>
+                          <span className="ml-auto font-bold text-white tabular-nums">
+                            Unavailable
+                          </span>
+                          <span className="w-11 text-right text-xs text-slate-400 tabular-nums">
+                            —
+                          </span>
+                        </li>
+                      )}
                     </ul>
                   </div>
                 )}

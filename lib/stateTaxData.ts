@@ -18,8 +18,10 @@
  *   withhold) and discloses the mid-year switch in the SC notes.
  *
  * CAVEATS carried from the research file (see the state entries):
- * - CA bracket widths are the 2025 inflation-adjusted amounts (the 2026 FTB
- *   adjustment was not yet published when the TF table was compiled).
+ * - CA: CORRECTED 15 Nov 2026 to the FTB's official 2026 indexed
+ *   amounts (FTB Tax News, Oct 2026): SD $5,900/$11,800, exemption
+ *   credit $158/$316, Schedule X/Y bracket tops. The old 2025-based
+ *   figures understated the deduction and overstated the tax.
  * - HI standard deduction / exemption are 2025 amounts for the same reason.
  * - UTAH has no standard deduction as a dollar amount: it gives a
  *   nonrefundable CREDIT of 6% of the federal standard deduction instead
@@ -36,9 +38,33 @@
  *   treatment. Never add an exception without a source.
  * - State payroll-insurance programs (STATE_INSURANCE_PROGRAMS) — CA SDI,
  *   NY PFL/DBL, NJ TDI/FLI/UI, WA PFML + WA Cares, MA/CT/OR/CO/MN paid
- *   leave, RI/HI TDI — are modeled separately from income tax, each with
- *   its verified 2026 rate, cap and official source. Programs whose 2026
- *   rate could not be verified are NOT listed.
+ *   leave, RI/HI TDI, AK UI, PA UC, ME PFML, DE Paid Leave — are modeled
+ *   separately from income tax, each with its verified 2026 rate, cap and
+ *   official source. Programs whose 2026 rate could not be verified are
+ *   NOT listed.
+ * - Per-state adjustments (round-4 friend audit, 15 Nov 2026): AL
+ *   standard-deduction phase-down + full federal-tax deduction (ALDOR
+ *   withholding booklet, Rev. Jan 2026); WI standard-deduction phaseout
+ *   (2026 Form 1-ES); AR 3.7% phase-in band $94,701–$97,600 (DFA
+ *   Withholding Tax Formula Method, eff. 01/01/2026); MD personal-exemption
+ *   phaseout (2026 PV Worksheet, Line 6); MO tiered federal-tax deduction
+ *   (RSMo §143.171); SC SCIAD phaseout (SCDOR Information Letter #26-20).
+ * - Round-5 engine fixes (15 Nov 2026): OR capped+phased federal-tax
+ *   deduction (2026 OR-ESTIMATE / OR-17) + $263 exemption-credit AGI
+ *   cutoff (ORS 316.085(5)); UT taxpayer-credit phaseout (Utah Code
+ *   §59-10-1018); CT Tax Calculation Schedule (2026 CT-1040ES Tables
+ *   A–E — CT has NO standard deduction; the $15,000 is a phased
+ *   exemption); head-of-household schedules for 29 states, with an
+ *   explicit hohUnsupported flag for the 13 unverified ones (DC, OR, VT,
+ *   MA, NM, AR, DE, MS, OH, RI, VA, WV, MD); federal HoH 24%/32% tops
+ *   corrected to $201,750/$256,200 (Rev. Proc. 2025-32 Table 2); PA
+ *   employee UC 0.07% (no cap), ME PFML 0.5% and DE Paid Leave 0.4%
+ *   added to STATE_INSURANCE_PROGRAMS.
+ *   The AL/MO/OR federal-tax deduction uses the engine's own computed federal
+ *   liability as an ESTIMATE (not observed withholding) — see
+ *   estimateFederalLiability in paycheckCalc.ts and the
+ *   federalLiabilityEstimate field on StateEstimateResult; content must
+ *   label it as an estimate.
  * - New York local tax: NYC resident brackets 3.078%–3.876% (NY Tax Dept,
  *   Form IT-2105-I (2026), p. 10) on NY State taxable income, minus the
  *   $63/$125 NYC school tax credit (income ≤ $250,000); the NYC
@@ -51,7 +77,7 @@
  *   official withholding formula — paychecks can differ by a few dollars.
  */
 
-import { applyBrackets } from "./paycheckCalc";
+import { applyBrackets, estimateFederalLiability } from "./paycheckCalc";
 import type {
   FilingStatus,
   NyLocalOption,
@@ -66,6 +92,12 @@ export interface StateBracket {
   /** Top of this bracket (taxable income, single filer). null = no ceiling. */
   upTo: number | null;
   ratePct: number;
+  /**
+   * Lump sum added once when this bracket is entered, on top of the
+   * marginal rate (e.g. Ohio's $332 step in ORC 5747.02(A)(3)(c)).
+   * Absent on every other bracket.
+   */
+  base?: number;
 }
 
 export interface StateTaxInfo {
@@ -86,10 +118,61 @@ export interface StateTaxInfo {
   /** Nonrefundable credit ($) subtracted AFTER the rate is applied. null = none. */
   creditSingle: number | null;
   creditMfj: number | null;
+  /** Head-of-household standard deduction ($), when it differs from single (AL head-of-family $5,200; WI $18,030; SC $22,500). Absent = same as single. */
+  standardDeductionHoh?: number | null;
+  /** Married-filing-separately standard deduction ($), when it differs from single (AL $4,250; WI $12,280). Absent = same as single. */
+  standardDeductionMfs?: number | null;
+  /** Head-of-household personal exemption ($), when it differs from single (AL head of family $3,000; KS $11,480; CT $19,000). Absent = same as single. */
+  exemptionHoh?: number | null;
+  /** Married-filing-separately personal exemption ($), when it differs from single (CT $12,000). Absent = same as single. */
+  exemptionMfs?: number | null;
+  /** Head-of-household nonrefundable credit ($), when it differs from single (IA $80; UT $1,449; CT — see ctSchedule). Absent = same as single. */
+  creditHoh?: number | null;
+  /**
+   * Head-of-household modeling status (round-5, 15 Nov 2026).
+   * true = the HoH schedule is verified and modeled (bracketsHoh when the
+   * HoH schedule differs from single; otherwise the single schedule, which
+   * the state itself prescribes). false = the HoH schedule is unverified —
+   * estimateStateWithholding returns { state: null, hohUnsupported: true }
+   * instead of silently substituting the single-filer number. Absent =
+   * supported (legacy single fallback); every income-tax entry now sets
+   * this explicitly. No-tax states return $0 before the check runs.
+   */
+  hohSupported?: boolean;
+  /** Utah-style taxpayer-credit phaseout (Utah Code §59-10-1018). */
+  creditPhaseout?: CreditPhaseoutRule | null;
+  /**
+   * Credit AGI cutoff (OR: the $263 exemption credit is $0 when federal
+   * AGI exceeds $100,000 single/MFS or $200,000 MFJ/HoH — ORS 316.085(5)).
+   * The engine's AGI proxy is stateTaxableBase.
+   */
+  creditAgiLimit?: { single: number; joint: number } | null;
+  /** Connecticut Tax Calculation Schedule (2026 CT-1040ES Tables A–E). */
+  ctSchedule?: ConnecticutSchedule | null;
+  /** Alabama-style standard-deduction phase-down (stepped, with a floor). */
+  sdPhaseDown?: SdPhaseDownRule | null;
+  /** Wisconsin-style standard-deduction phaseout (percentage of income over a threshold, floored at $0). */
+  sdPhaseout?: SdPhaseoutRule | null;
+  /** Federal income-tax deduction (AL full; MO tiered per §143.171; OR capped+phased). Input is the engine's computed federal liability (estimate). */
+  federalTaxDeduction?: FederalTaxDeductionRule | null;
+  /** Maryland-style personal-exemption phaseout (per-exemption amount by AGI band). */
+  exemptionPhaseout?: ExemptionPhaseoutRule | null;
+  /** Arkansas phase-in band for the 3.7% top rate ($94,701–$97,600). */
+  arPhaseInBand?: ArkansasPhaseInBand | null;
+  /** South Carolina SCIAD phaseout (Information Letter #26-20). */
+  sciadPhaseout?: SciadPhaseoutRule | null;
   /** Graduated brackets (single filer). null for flat / no-tax states. */
   brackets: StateBracket[] | null;
   /** Graduated brackets (married filing jointly). null for flat / no-tax states. */
   bracketsMfj: StateBracket[] | null;
+  /**
+   * Graduated brackets (head of household), when the HoH schedule differs
+   * from single (NY, CA, MN, ME, HI, NE, OK, ND, MT, ID, CT; NJ uses the
+   * MFJ table). Absent on hohSupported states whose HoH schedule IS the
+   * single schedule (AL, WI, SC, KS, MO, GA, PA, IL, IN, KY, MI) — the
+   * estimator falls back to `brackets` for those, by design.
+   */
+  bracketsHoh?: StateBracket[] | null;
   /** True only when every number on this entry was verified (see header). */
   verified: boolean;
   /** Best source link available right now (Tax Foundation 2026 tables). */
@@ -103,8 +186,221 @@ export interface StateTaxInfo {
   localTaxNote: string | null;
 }
 
-export const STATE_TAX_DATA: StateTaxInfo[] = [
-  {
+// ---- Per-state adjustment rules (round-4 friend audit, 15 Nov 2026) ----
+// Each rule is data on the state entry; the math lives in the exported
+// helpers just above estimateStateWithholding. Income measures:
+// - AL phase-down: annual GROSS income (the ALDOR booklet chart is keyed to gross).
+// - WI/MD/MO/SC phaseouts: AGI — the engine's proxy is stateTaxableBase
+//   (gross minus the pre-tax deductions the state excludes).
+// - AR band: NET TAXABLE income (after the $2,470 standard deduction),
+//   i.e. the `taxable` variable in estimateStateWithholding.
+
+/** One filing status's leg of an Alabama-style stepped phase-down. */
+export interface SdPhaseDownLeg {
+  /** Standard deduction at or below the threshold. */
+  base: number;
+  /** Floor — the deduction never falls below this. */
+  floor: number;
+  /** Dollars lost per step (e.g. $25 single, $175 MFJ, $135 HoF, $88 MFS). */
+  reductionPerStep: number;
+  /** Income width of one step ($500, or $250 for AL MFS). */
+  stepSize: number;
+  /** Income at or below which the full base applies. */
+  threshold: number;
+}
+
+export interface SdPhaseDownRule {
+  single: SdPhaseDownLeg;
+  marriedFilingJointly: SdPhaseDownLeg;
+  headOfHousehold: SdPhaseDownLeg;
+  marriedFilingSeparately: SdPhaseDownLeg;
+}
+
+/** One filing status's leg of a Wisconsin-style percentage phaseout. */
+export interface SdPhaseoutLeg {
+  /** Standard deduction at or below the threshold. */
+  base: number;
+  /** Income at or below which the full base applies. */
+  threshold: number;
+  /** Percent of income over the threshold subtracted (e.g. 12 single). */
+  ratePct: number;
+}
+
+export interface SdPhaseoutRule {
+  single: SdPhaseoutLeg;
+  marriedFilingJointly: SdPhaseoutLeg;
+  marriedFilingSeparately: SdPhaseoutLeg;
+  /**
+   * Head of household: the rate applies from the threshold up to
+   * segmentEnd ($58,827); above that the SINGLE leg's formula takes over
+   * (Form 1-ES: the HoH schedule converges to the single schedule).
+   * The ~$0.46 seam at $58,827 is the state's own table rounding.
+   */
+  headOfHousehold: SdPhaseoutLeg & { segmentEnd: number };
+}
+
+/**
+ * Federal income-tax deduction.
+ * - "full" (AL): 100% of the federal liability, no cap.
+ * - "tiered" (MO §143.171): the percentage depends on MO AGI, capped at
+ *   $5,000 single / $10,000 joint.
+ * - "cappedPhased" (OR, 2026 Publication OR-ESTIMATE line 9 / OR-17):
+ *   the federal liability is deductible up to a cap ($8,750; $4,375 MFS)
+ *   that phases out above a federal-AGI threshold — single/MFS starts at
+ *   $125,000 and loses $1,750 per further $5,000 band ($0 at $145,000);
+ *   MFJ/HoH starts at $250,000 and loses $1,750 per further $10,000 band
+ *   ($0 at $290,000). `agi` is the federal-AGI proxy (stateTaxableBase).
+ */
+export type FederalTaxDeductionRule =
+  | { kind: "full" }
+  | {
+      kind: "tiered";
+      tiers: { upTo: number | null; pct: number }[];
+      capSingle: number;
+      capMfj: number;
+    }
+  | {
+      kind: "cappedPhased";
+      capSingle: number;
+      capMfj: number;
+      capMfs: number;
+      phaseoutStartSingle: number;
+      phaseoutStartJoint: number;
+      stepSizeSingle: number;
+      stepSizeJoint: number;
+      stepAmount: number;
+    };
+
+/**
+ * Utah taxpayer-credit phaseout (Utah Code §59-10-1018): the credit is
+ * reduced $0.013 per $1 of Utah taxable income over the indexed base —
+ * 2026 bases single/MFS $18,696, HoH $28,045, MFJ $37,392 (UT Legislature
+ * Revenue & Taxation Interim Committee, 2026 Tax Credit Review). The
+ * credit reaches $0 at ≈ $93,004 of taxable income (single).
+ */
+export interface CreditPhaseoutRule {
+  /** Credit lost per $1 of taxable income over the base. */
+  ratePerDollar: number;
+  /** Indexed income base by filing status. */
+  bases: Record<FilingStatus, number>;
+}
+
+/** One leg of CT Table C (2% phase-out add-back, 2026 CT-1040ES). */
+export interface ConnecticutTableCLeg {
+  /** CT AGI at or below which the add-back is $0. */
+  threshold: number;
+  /** AGI width of one step ($5,000 single/MFJ, $2,500 MFS, $4,000 HoH). */
+  bandWidth: number;
+  /** Dollars added per step ($25 single/MFS, $50 MFJ, $40 HoH). */
+  step: number;
+  /** Maximum add-back ($250 single/MFS, $500 MFJ, $400 HoH). */
+  max: number;
+}
+
+/**
+ * One leg of CT Table D (tax recapture, 2026 CT-1040ES). Three phases:
+ * a stepped climb from p1Threshold to p1SteppedUpTo, a flat plateau to
+ * p1FlatUpTo, a second stepped climb from p2Start to p2SteppedUpTo, a
+ * second plateau to p2FlatUpTo, then a stepped climb from p3Start capped
+ * at p3Max. (Single: $25/$5k to $150k, $250 flat to $200k, $90/$5k to
+ * $345k, $2,950 flat to $500k, $50/$5k to $3,400 max at $540k+.)
+ */
+export interface ConnecticutTableDLeg {
+  p1Threshold: number;
+  p1Width: number;
+  p1Step: number;
+  p1SteppedUpTo: number;
+  p1FlatUpTo: number;
+  p1Flat: number;
+  p2Start: number;
+  p2Width: number;
+  p2Step: number;
+  p2SteppedUpTo: number;
+  p2FlatUpTo: number;
+  p2Flat: number;
+  p3Start: number;
+  p3Width: number;
+  p3Step: number;
+  p3Max: number;
+}
+
+/** One band of CT Table E (personal tax credit, % of tax). */
+export interface ConnecticutTableEBand {
+  /** CT AGI at or below which this rate applies (null = no ceiling). */
+  upTo: number | null;
+  /** Credit rate (0.75 down to 0). */
+  rate: number;
+}
+
+/**
+ * Connecticut Tax Calculation Schedule (2026 Form CT-1040ES, Rev. 01/26,
+ * portal.ct.gov). Table A: the personal exemption (exemptionSingle/Mfj/
+ * Hoh/Mfs on the entry — $15,000/$24,000/$19,000/$12,000) phases out
+ * $1,000 per $1,000 (or part) of CT AGI over tableAThreshold; Table B is
+ * the ordinary brackets; Table C is the add-back; Table D is the
+ * recapture; Table E is the personal credit (a % of Table B + C + D).
+ * The $15,000 used to sit in standardDeductionSingle mislabelled as a
+ * standard deduction — Connecticut has NO standard deduction.
+ */
+export interface ConnecticutSchedule {
+  /** Table A phaseout threshold by filing status. */
+  tableAThreshold: Record<FilingStatus, number>;
+  tableC: Record<FilingStatus, ConnecticutTableCLeg>;
+  tableD: Record<FilingStatus, ConnecticutTableDLeg>;
+  tableE: Record<FilingStatus, ConnecticutTableEBand[]>;
+}
+
+/** One AGI band of a Maryland-style per-exemption phaseout. */
+export interface ExemptionPhaseoutBand {
+  /** AGI at or below which this per-exemption amount applies (null = no ceiling). */
+  upTo: number | null;
+  /** Exemption dollars per exemption (one per filer: single 1, joint 2). */
+  perExemption: number;
+}
+
+export interface ExemptionPhaseoutRule {
+  /** Bands for single + married filing separately (1 exemption). */
+  single: ExemptionPhaseoutBand[];
+  /** Bands for married filing jointly (2 exemptions) + head of household (1). */
+  joint: ExemptionPhaseoutBand[];
+}
+
+/**
+ * Arkansas phase-in band (DFA Withholding Tax Formula Method, eff.
+ * 01/01/2026): between bandStart and bandEnd the tax is
+ * ratePct% x net taxable income minus a subtraction that starts at
+ * firstSubtraction and falls stepDecrement per stepSize of income; above
+ * the band the subtraction is aboveSubtraction. Below the band the normal
+ * brackets apply (they equal ratePct% - $367.16 for $26,400–$94,700).
+ */
+export interface ArkansasPhaseInBand {
+  bandStart: number;
+  bandEnd: number;
+  firstSubtraction: number;
+  stepDecrement: number;
+  stepSize: number;
+  aboveSubtraction: number;
+  ratePct: number;
+}
+
+/** One filing status's leg of the South Carolina SCIAD phaseout. */
+export interface SciadPhaseoutLeg {
+  /** Full SCIAD at or below the threshold ($15,000 single, $30,000 joint, $22,500 HoH). */
+  base: number;
+  /** AGI at or below which the full SCIAD applies. */
+  threshold: number;
+  /** AGI span over which the SCIAD phases to $0 (e.g. $55,000 single: $0 at $95,000). */
+  span: number;
+}
+
+export interface SciadPhaseoutRule {
+  single: SciadPhaseoutLeg;
+  marriedFilingJointly: SciadPhaseoutLeg;
+  headOfHousehold: SciadPhaseoutLeg;
+  marriedFilingSeparately: SciadPhaseoutLeg;
+}
+
+export const STATE_TAX_DATA: StateTaxInfo[] = [  {
     slug: "alabama-paycheck-calculator",
     state: "Alabama",
     abbreviation: "AL",
@@ -112,19 +408,33 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     flatRatePct: null,
     standardDeductionSingle: 3000,
     standardDeductionMfj: 8500,
+    standardDeductionHoh: 5200,
+    standardDeductionMfs: 4250,
     exemptionSingle: 1500,
     exemptionMfj: 3000,
+    exemptionHoh: 3000,
     creditSingle: null,
     creditMfj: null,
+    // AL head of family uses the single bracket schedule (ALDOR) with its
+    // own $5,200 standard deduction + $3,000 exemption; the phase-down leg
+    // above already carries the HoF taper.
+    hohSupported: true,
+    sdPhaseDown: {
+      single: { base: 3000, floor: 2500, reductionPerStep: 25, stepSize: 500, threshold: 25999 },
+      marriedFilingJointly: { base: 8500, floor: 5000, reductionPerStep: 175, stepSize: 500, threshold: 25999 },
+      headOfHousehold: { base: 5200, floor: 2500, reductionPerStep: 135, stepSize: 500, threshold: 25999 },
+      marriedFilingSeparately: { base: 4250, floor: 2500, reductionPerStep: 88, stepSize: 250, threshold: 12999 },
+    },
+    federalTaxDeduction: { kind: "full" },
     brackets: [{ upTo: 500, ratePct: 2 }, { upTo: 3000, ratePct: 4 }, { upTo: null, ratePct: 5 }],
     bracketsMfj: [{ upTo: 1000, ratePct: 2 }, { upTo: 6000, ratePct: 4 }, { upTo: null, ratePct: 5 }],
     verified: true,
     sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
-    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source.",
+    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source. Standard-deduction phase-down + federal-tax deduction per ALDOR Withholding Tax Tables and Instructions, Rev. Jan 2026 (whbooklet_0126.pdf): single $3,000 → $2,500 floor ($25 per $500 over $25,999); joint $8,500 → $5,000 floor ($175 per $500); head of family $5,200 → $2,500 ($135 per $500); MFS $4,250 → $2,500 ($88 per $250 over $12,999).",
     summary: "Alabama taxes wages on a graduated scale — the rate rises as income rises, from 2% to a top rate of 5% in 2026.",
     withholdingNotes: [
       "Alabama taxes taxable income in 3 brackets — only the dollars inside each bracket are taxed at that bracket's rate. The calculator subtracts the $3,000 single standard deduction first. A further $1,500 personal exemption also applies.",
-      "The standard deduction phases down as income rises, and Alabama also lets you deduct federal income tax paid.",
+      "The standard deduction phases down as gross income rises — $3,000 single down to a $2,500 floor ($8,500 down to $5,000 joint) — and Alabama also lets you deduct your federal income tax. The calculator subtracts its own estimated federal liability for that line (an estimate, not your actual withholding).",
     ],
     localTaxNote: "Some Alabama cities levy a local occupational tax on wages (for example, Birmingham) — separate from state withholding.",
   },
@@ -133,6 +443,7 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     state: "Alaska",
     abbreviation: "AK",
     structure: "none",
+    hohSupported: true,
     flatRatePct: null,
     standardDeductionSingle: null,
     standardDeductionMfj: null,
@@ -149,6 +460,7 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     withholdingNotes: [
       "Alaska levies no personal income tax at all, so there is no state withholding line on your paycheck.",
       "Federal tax, Social Security, and Medicare still apply exactly as in every other state.",
+      "Alaska workers still pay a 0.50% unemployment-insurance contribution on the first $54,200 of wages (max $271 a year) — the calculator shows it as its own line, separate from state income tax, which stays $0.",
     ],
     localTaxNote: null,
   },
@@ -158,21 +470,23 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     abbreviation: "AZ",
     structure: "flat",
     flatRatePct: 2.5,
-    standardDeductionSingle: 8350,
-    standardDeductionMfj: 16700,
+    standardDeductionSingle: 16100,
+    standardDeductionMfj: 32200,
+    standardDeductionHoh: 24150,
     exemptionSingle: null,
     exemptionMfj: null,
     creditSingle: null,
     creditMfj: null,
+    hohSupported: true,
     brackets: null,
     bracketsMfj: null,
     verified: true,
     sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
-    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source.",
+    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source. AZ standard deduction per A.R.S. § 43-1041 as amended by HB 4168 (Laws 2026, Ch. 140): $15,750 base indexed like the federal deduction = $16,100/$32,200 for 2026.",
     summary: "Arizona taxes income at a single flat rate of 2.5% in 2026. The lowest flat rate in the country.",
     withholdingNotes: [
-      "Arizona's 2.5% flat rate applies to every dollar of taxable income, after the $8,350 single standard deduction.",
-      "Arizona gives a $100 credit per dependent under 17 ($25 for age 17 and older).",
+      "Arizona's 2.5% flat rate applies to every dollar of taxable income, after the $16,100 single standard deduction.",
+      "Arizona gives a $125 credit per dependent under 17 ($25 for age 17 and older).",
     ],
     localTaxNote: null,
   },
@@ -186,17 +500,28 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     standardDeductionMfj: 4940,
     exemptionSingle: null,
     exemptionMfj: null,
-    creditSingle: null,
-    creditMfj: null,
-    brackets: [{ upTo: 4600, ratePct: 2 }, { upTo: null, ratePct: 3.9 }],
-    bracketsMfj: [{ upTo: 4600, ratePct: 2 }, { upTo: null, ratePct: 3.9 }],
+    creditSingle: 29,
+    creditMfj: 58,
+    hohSupported: false,
+    arPhaseInBand: {
+      bandStart: 94701,
+      bandEnd: 97600,
+      firstSubtraction: 369.9,
+      stepDecrement: 10,
+      stepSize: 100,
+      aboveSubtraction: 79.9,
+      ratePct: 3.7,
+    },
+    brackets: [{ upTo: 5599, ratePct: 0 }, { upTo: 11199, ratePct: 2 }, { upTo: 15999, ratePct: 3 }, { upTo: 26399, ratePct: 3.4 }, { upTo: null, ratePct: 3.7 }],
+    bracketsMfj: [{ upTo: 5599, ratePct: 0 }, { upTo: 11199, ratePct: 2 }, { upTo: 15999, ratePct: 3 }, { upTo: 26399, ratePct: 3.4 }, { upTo: null, ratePct: 3.7 }],
     verified: true,
     sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
-    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source.",
-    summary: "Arkansas taxes wages on a graduated scale — the rate rises as income rises, from 2% to a top rate of 3.9% in 2026.",
+    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source. 2026 schedule per the DFA Withholding Tax Formula Method, eff. 01/01/2026 (Act 1 of the 2026 First Extraordinary Session). Phase-in band $94,701–$97,600 of net taxable income: 3.7% minus a subtraction stepping $369.90 → $89.90 in $100 steps; 3.7% minus $79.90 above $97,601.",
+    summary: "Arkansas taxes wages on a graduated scale — the rate rises as income rises, from 0% to a top rate of 3.7% in 2026.",
     withholdingNotes: [
-      "Arkansas taxes taxable income in 2 brackets — only the dollars inside each bracket are taxed at that bracket's rate. The calculator subtracts the $2,470 single standard deduction first.",
+      "Arkansas taxes taxable income in 5 brackets — only the dollars inside each bracket are taxed at that bracket's rate. The calculator subtracts the $2,470 single standard deduction first, then a $29 credit per exemption.",
       "A separate lower-rate tax table applies if you earn $92,300 or less.",
+      "Above $94,700 of net taxable income the 3.7% rate phases in over a $94,701–$97,600 band before the full rate applies.",
     ],
     localTaxNote: null,
   },
@@ -206,22 +531,25 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     abbreviation: "CA",
     structure: "graduated",
     flatRatePct: null,
-    standardDeductionSingle: 5540,
-    standardDeductionMfj: 11080,
+    standardDeductionSingle: 5900,
+    standardDeductionMfj: 11800,
+    standardDeductionHoh: 11800,
     exemptionSingle: null,
     exemptionMfj: null,
-    creditSingle: 153,
-    creditMfj: 306,
-    brackets: [{ upTo: 11079, ratePct: 1 }, { upTo: 26264, ratePct: 2 }, { upTo: 41452, ratePct: 4 }, { upTo: 57542, ratePct: 6 }, { upTo: 72724, ratePct: 8 }, { upTo: 371479, ratePct: 9.3 }, { upTo: 445771, ratePct: 10.3 }, { upTo: 742953, ratePct: 11.3 }, { upTo: 1000000, ratePct: 12.3 }, { upTo: null, ratePct: 13.3 }],
-    bracketsMfj: [{ upTo: 22158, ratePct: 1 }, { upTo: 52528, ratePct: 2 }, { upTo: 82904, ratePct: 4 }, { upTo: 115084, ratePct: 6 }, { upTo: 145448, ratePct: 8 }, { upTo: 742958, ratePct: 9.3 }, { upTo: 891542, ratePct: 10.3 }, { upTo: 1000000, ratePct: 11.3 }, { upTo: 1485906, ratePct: 12.3 }, { upTo: null, ratePct: 13.3 }],
+    creditSingle: 158,
+    creditMfj: 316,
+    creditHoh: 158,
+    hohSupported: true,
+    brackets: [{ upTo: 11456, ratePct: 1 }, { upTo: 27157, ratePct: 2 }, { upTo: 42861, ratePct: 4 }, { upTo: 59498, ratePct: 6 }, { upTo: 75197, ratePct: 8 }, { upTo: 384109, ratePct: 9.3 }, { upTo: 460927, ratePct: 10.3 }, { upTo: 768213, ratePct: 11.3 }, { upTo: 1000000, ratePct: 12.3 }, { upTo: null, ratePct: 13.3 }],
+    bracketsMfj: [{ upTo: 22912, ratePct: 1 }, { upTo: 54314, ratePct: 2 }, { upTo: 85722, ratePct: 4 }, { upTo: 118996, ratePct: 6 }, { upTo: 150394, ratePct: 8 }, { upTo: 768218, ratePct: 9.3 }, { upTo: 921854, ratePct: 10.3 }, { upTo: 1000000, ratePct: 11.3 }, { upTo: 1536426, ratePct: 12.3 }, { upTo: null, ratePct: 13.3 }],
+    bracketsHoh: [{ upTo: 22927, ratePct: 1 }, { upTo: 54316, ratePct: 2 }, { upTo: 70018, ratePct: 4 }, { upTo: 86654, ratePct: 6 }, { upTo: 102356, ratePct: 8 }, { upTo: 522385, ratePct: 9.3 }, { upTo: 626864, ratePct: 10.3 }, { upTo: 1000000, ratePct: 11.3 }, { upTo: 1044771, ratePct: 12.3 }, { upTo: null, ratePct: 13.3 }],
     verified: true,
-    sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
-    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source. CA bracket widths are the 2025 inflation-adjusted amounts (the 2026 FTB adjustment was not yet published).",
+    sourceUrl: "https://www.ftb.ca.gov/about-ftb/newsroom/tax-news/2026/10.html",
+    sourceNote: "CORRECTED 15 Nov 2026 to the FTB's official 2026 indexed amounts (FTB Tax News, October 2026; CCPI inflation 3.4%): standard deduction $5,900 single / $11,800 joint, personal exemption credit $158 / $316, and the 2026 Schedule X/Y bracket tops. The previous figures were the 2025 inflation-adjusted amounts.",
     summary: "California taxes wages on a graduated scale — the rate rises as income rises, from 1% to a top rate of 13.3% in 2026. The highest top rate in the country.",
     withholdingNotes: [
-      "California taxes taxable income in 10 brackets — only the dollars inside each bracket are taxed at that bracket's rate. The calculator subtracts the $5,540 single standard deduction first.",
-      "The 13.3% top rate includes the 1% Mental Health Services Tax on taxable income over $1 million.",
-      "Bracket widths shown are the 2025 inflation-adjusted amounts — the 2026 FTB adjustment was not yet published when the Tax Foundation compiled its 2026 table.",
+      "California taxes taxable income in 10 brackets — only the dollars inside each bracket are taxed at that bracket's rate. The calculator subtracts the $5,900 single standard deduction first.",
+      "The 13.3% top rate is the 12.3% bracket rate plus the 1% Behavioral Health Services Tax (previously called the Mental Health Services Tax) on taxable income over $1 million.",
       "California's 1.3% SDI payroll tax has no wage ceiling and is separate from income tax — the calculator shows it as its own deduction line below.",
       "California taxes HSA contributions — they do not reduce CA taxable income, unlike 401(k) and Section 125 items.",
     ],
@@ -235,10 +563,12 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     flatRatePct: 4.4,
     standardDeductionSingle: 16100,
     standardDeductionMfj: 32200,
+    standardDeductionHoh: 24150,
     exemptionSingle: null,
     exemptionMfj: null,
     creditSingle: null,
     creditMfj: null,
+    hohSupported: true,
     brackets: null,
     bracketsMfj: null,
     verified: true,
@@ -257,17 +587,47 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     abbreviation: "CT",
     structure: "graduated",
     flatRatePct: null,
-    standardDeductionSingle: 15000,
-    standardDeductionMfj: 24000,
-    exemptionSingle: null,
-    exemptionMfj: null,
+    standardDeductionSingle: null,
+    standardDeductionMfj: null,
+    exemptionSingle: 15000,
+    exemptionMfj: 24000,
+    exemptionHoh: 19000,
+    exemptionMfs: 12000,
     creditSingle: null,
     creditMfj: null,
+    hohSupported: true,
+    ctSchedule: {
+      tableAThreshold: {
+        single: 30000,
+        marriedFilingJointly: 48000,
+        headOfHousehold: 38000,
+        marriedFilingSeparately: 24000,
+      },
+      tableC: {
+        single: { threshold: 56500, bandWidth: 5000, step: 25, max: 250 },
+        marriedFilingJointly: { threshold: 100500, bandWidth: 5000, step: 50, max: 500 },
+        headOfHousehold: { threshold: 78500, bandWidth: 4000, step: 40, max: 400 },
+        marriedFilingSeparately: { threshold: 50250, bandWidth: 2500, step: 25, max: 250 },
+      },
+      tableD: {
+        single: { p1Threshold: 105000, p1Width: 5000, p1Step: 25, p1SteppedUpTo: 150000, p1FlatUpTo: 200000, p1Flat: 250, p2Start: 200000, p2Width: 5000, p2Step: 90, p2SteppedUpTo: 345000, p2FlatUpTo: 500000, p2Flat: 2950, p3Start: 500000, p3Width: 5000, p3Step: 50, p3Max: 3400 },
+        marriedFilingJointly: { p1Threshold: 210000, p1Width: 10000, p1Step: 50, p1SteppedUpTo: 300000, p1FlatUpTo: 400000, p1Flat: 500, p2Start: 400000, p2Width: 10000, p2Step: 180, p2SteppedUpTo: 690000, p2FlatUpTo: 1000000, p2Flat: 5900, p3Start: 1000000, p3Width: 10000, p3Step: 100, p3Max: 6800 },
+        headOfHousehold: { p1Threshold: 168000, p1Width: 8000, p1Step: 40, p1SteppedUpTo: 240000, p1FlatUpTo: 320000, p1Flat: 400, p2Start: 320000, p2Width: 8000, p2Step: 140, p2SteppedUpTo: 552000, p2FlatUpTo: 800000, p2Flat: 4600, p3Start: 800000, p3Width: 8000, p3Step: 80, p3Max: 5320 },
+        marriedFilingSeparately: { p1Threshold: 105000, p1Width: 5000, p1Step: 25, p1SteppedUpTo: 150000, p1FlatUpTo: 200000, p1Flat: 250, p2Start: 200000, p2Width: 5000, p2Step: 90, p2SteppedUpTo: 345000, p2FlatUpTo: 500000, p2Flat: 2950, p3Start: 500000, p3Width: 5000, p3Step: 50, p3Max: 3400 },
+      },
+      tableE: {
+        single: [{ upTo: 18800, rate: 0.75 }, { upTo: 19300, rate: 0.7 }, { upTo: 19800, rate: 0.65 }, { upTo: 20300, rate: 0.6 }, { upTo: 20800, rate: 0.55 }, { upTo: 21300, rate: 0.5 }, { upTo: 21800, rate: 0.45 }, { upTo: 22300, rate: 0.4 }, { upTo: 25000, rate: 0.35 }, { upTo: 25500, rate: 0.3 }, { upTo: 26000, rate: 0.25 }, { upTo: 26500, rate: 0.2 }, { upTo: 31300, rate: 0.15 }, { upTo: 31800, rate: 0.14 }, { upTo: 32300, rate: 0.13 }, { upTo: 32800, rate: 0.12 }, { upTo: 33300, rate: 0.11 }, { upTo: 60000, rate: 0.1 }, { upTo: 60500, rate: 0.09 }, { upTo: 61000, rate: 0.08 }, { upTo: 61500, rate: 0.07 }, { upTo: 62000, rate: 0.06 }, { upTo: 62500, rate: 0.05 }, { upTo: 63000, rate: 0.04 }, { upTo: 63500, rate: 0.03 }, { upTo: 64000, rate: 0.02 }, { upTo: 64500, rate: 0.01 }, { upTo: null, rate: 0 }],
+        marriedFilingJointly: [{ upTo: 30000, rate: 0.75 }, { upTo: 30500, rate: 0.7 }, { upTo: 31000, rate: 0.65 }, { upTo: 31500, rate: 0.6 }, { upTo: 32000, rate: 0.55 }, { upTo: 32500, rate: 0.5 }, { upTo: 33000, rate: 0.45 }, { upTo: 33500, rate: 0.4 }, { upTo: 40000, rate: 0.35 }, { upTo: 40500, rate: 0.3 }, { upTo: 41000, rate: 0.25 }, { upTo: 41500, rate: 0.2 }, { upTo: 50000, rate: 0.15 }, { upTo: 50500, rate: 0.14 }, { upTo: 51000, rate: 0.13 }, { upTo: 51500, rate: 0.12 }, { upTo: 52000, rate: 0.11 }, { upTo: 96000, rate: 0.1 }, { upTo: 96500, rate: 0.09 }, { upTo: 97000, rate: 0.08 }, { upTo: 97500, rate: 0.07 }, { upTo: 98000, rate: 0.06 }, { upTo: 98500, rate: 0.05 }, { upTo: 99000, rate: 0.04 }, { upTo: 99500, rate: 0.03 }, { upTo: 100000, rate: 0.02 }, { upTo: 100500, rate: 0.01 }, { upTo: null, rate: 0 }],
+        headOfHousehold: [{ upTo: 24000, rate: 0.75 }, { upTo: 24500, rate: 0.7 }, { upTo: 25000, rate: 0.65 }, { upTo: 25500, rate: 0.6 }, { upTo: 26000, rate: 0.55 }, { upTo: 26500, rate: 0.5 }, { upTo: 27000, rate: 0.45 }, { upTo: 27500, rate: 0.4 }, { upTo: 34000, rate: 0.35 }, { upTo: 34500, rate: 0.3 }, { upTo: 35000, rate: 0.25 }, { upTo: 35500, rate: 0.2 }, { upTo: 44000, rate: 0.15 }, { upTo: 44500, rate: 0.14 }, { upTo: 45000, rate: 0.13 }, { upTo: 45500, rate: 0.12 }, { upTo: 46000, rate: 0.11 }, { upTo: 74000, rate: 0.1 }, { upTo: 74500, rate: 0.09 }, { upTo: 75000, rate: 0.08 }, { upTo: 75500, rate: 0.07 }, { upTo: 76000, rate: 0.06 }, { upTo: 76500, rate: 0.05 }, { upTo: 77000, rate: 0.04 }, { upTo: 77500, rate: 0.03 }, { upTo: 78000, rate: 0.02 }, { upTo: 78500, rate: 0.01 }, { upTo: null, rate: 0 }],
+        marriedFilingSeparately: [{ upTo: 15000, rate: 0.75 }, { upTo: 15500, rate: 0.7 }, { upTo: 16000, rate: 0.65 }, { upTo: 16500, rate: 0.6 }, { upTo: 17000, rate: 0.55 }, { upTo: 17500, rate: 0.5 }, { upTo: 18000, rate: 0.45 }, { upTo: 18500, rate: 0.4 }, { upTo: 20000, rate: 0.35 }, { upTo: 20500, rate: 0.3 }, { upTo: 21000, rate: 0.25 }, { upTo: 21500, rate: 0.2 }, { upTo: 25000, rate: 0.15 }, { upTo: 25500, rate: 0.14 }, { upTo: 26000, rate: 0.13 }, { upTo: 26500, rate: 0.12 }, { upTo: 27000, rate: 0.11 }, { upTo: 48000, rate: 0.1 }, { upTo: 48500, rate: 0.09 }, { upTo: 49000, rate: 0.08 }, { upTo: 49500, rate: 0.07 }, { upTo: 50000, rate: 0.06 }, { upTo: 50500, rate: 0.05 }, { upTo: 51000, rate: 0.04 }, { upTo: 51500, rate: 0.03 }, { upTo: 52000, rate: 0.02 }, { upTo: 52500, rate: 0.01 }, { upTo: null, rate: 0 }],
+      },
+    },
     brackets: [{ upTo: 10000, ratePct: 2 }, { upTo: 50000, ratePct: 4.5 }, { upTo: 100000, ratePct: 5.5 }, { upTo: 200000, ratePct: 6 }, { upTo: 250000, ratePct: 6.5 }, { upTo: 500000, ratePct: 6.9 }, { upTo: null, ratePct: 6.99 }],
     bracketsMfj: [{ upTo: 20000, ratePct: 2 }, { upTo: 100000, ratePct: 4.5 }, { upTo: 200000, ratePct: 5.5 }, { upTo: 400000, ratePct: 6 }, { upTo: 500000, ratePct: 6.5 }, { upTo: 1000000, ratePct: 6.9 }, { upTo: null, ratePct: 6.99 }],
+    bracketsHoh: [{ upTo: 16000, ratePct: 2 }, { upTo: 80000, ratePct: 4.5 }, { upTo: 160000, ratePct: 5.5 }, { upTo: 320000, ratePct: 6 }, { upTo: 400000, ratePct: 6.5 }, { upTo: 800000, ratePct: 6.9 }, { upTo: null, ratePct: 6.99 }],
     verified: true,
     sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
-    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source.",
+    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source. Full Tax Calculation Schedule per 2026 Form CT-1040ES (Rev. 01/26, CT DRS, portal.ct.gov): Table A exemption $15,000 single / $24,000 joint / $19,000 HoH / $12,000 MFS, −$1,000 per $1,000 over $30,000 / $48,000 / $38,000 / $24,000 AGI ($1,000 remains at exactly $44,000 single); Table B brackets; Table C add-back; Table D recapture; Table E personal credit (75% down to 0% — single 0% above $64,500, HoH above $78,500, MFJ above $100,500, MFS above $52,500). CORRECTED 15 Nov 2026: the $15,000 was mislabelled as a standard deduction — Connecticut has NO standard deduction; it is a phased personal exemption.",
     summary: "Connecticut taxes wages on a graduated scale — the rate rises as income rises, from 2% to a top rate of 6.99% in 2026.",
     withholdingNotes: [
       "Connecticut taxes taxable income in 7 brackets — only the dollars inside each bracket are taxed at that bracket's rate. The calculator subtracts the $15,000 personal exemption (single filer) first.",
@@ -287,6 +647,7 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     exemptionMfj: null,
     creditSingle: 110,
     creditMfj: 220,
+    hohSupported: false,
     brackets: [{ upTo: 2000, ratePct: 0 }, { upTo: 5000, ratePct: 2.2 }, { upTo: 10000, ratePct: 3.9 }, { upTo: 20000, ratePct: 4.8 }, { upTo: 25000, ratePct: 5.2 }, { upTo: 60000, ratePct: 5.55 }, { upTo: null, ratePct: 6.6 }],
     bracketsMfj: [{ upTo: 2000, ratePct: 0 }, { upTo: 5000, ratePct: 2.2 }, { upTo: 10000, ratePct: 3.9 }, { upTo: 20000, ratePct: 4.8 }, { upTo: 25000, ratePct: 5.2 }, { upTo: 60000, ratePct: 5.55 }, { upTo: null, ratePct: 6.6 }],
     verified: true,
@@ -311,6 +672,7 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     exemptionMfj: null,
     creditSingle: null,
     creditMfj: null,
+    hohSupported: false,
     brackets: [{ upTo: 10000, ratePct: 4 }, { upTo: 40000, ratePct: 6 }, { upTo: 60000, ratePct: 6.5 }, { upTo: 250000, ratePct: 8.5 }, { upTo: 500000, ratePct: 9.25 }, { upTo: 1000000, ratePct: 9.75 }, { upTo: null, ratePct: 10.75 }],
     bracketsMfj: [{ upTo: 10000, ratePct: 4 }, { upTo: 40000, ratePct: 6 }, { upTo: 60000, ratePct: 6.5 }, { upTo: 250000, ratePct: 8.5 }, { upTo: 500000, ratePct: 9.25 }, { upTo: 1000000, ratePct: 9.75 }, { upTo: null, ratePct: 10.75 }],
     verified: true,
@@ -327,6 +689,7 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     state: "Florida",
     abbreviation: "FL",
     structure: "none",
+    hohSupported: true,
     flatRatePct: null,
     standardDeductionSingle: null,
     standardDeductionMfj: null,
@@ -354,10 +717,12 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     flatRatePct: 4.99,
     standardDeductionSingle: 15000,
     standardDeductionMfj: 30000,
+    standardDeductionHoh: 15000,
     exemptionSingle: null,
     exemptionMfj: null,
     creditSingle: null,
     creditMfj: null,
+    hohSupported: true,
     brackets: null,
     bracketsMfj: null,
     verified: true,
@@ -376,21 +741,26 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     abbreviation: "HI",
     structure: "graduated",
     flatRatePct: null,
-    standardDeductionSingle: 4400,
-    standardDeductionMfj: 8800,
+    standardDeductionSingle: 8000,
+    standardDeductionMfj: 16000,
+    standardDeductionHoh: 12000,
     exemptionSingle: 1144,
     exemptionMfj: 2288,
+    exemptionHoh: 1144,
     creditSingle: null,
     creditMfj: null,
+    hohSupported: true,
     brackets: [{ upTo: 9600, ratePct: 1.4 }, { upTo: 14400, ratePct: 3.2 }, { upTo: 19200, ratePct: 5.5 }, { upTo: 24000, ratePct: 6.4 }, { upTo: 36000, ratePct: 6.8 }, { upTo: 48000, ratePct: 7.2 }, { upTo: 125000, ratePct: 7.6 }, { upTo: 175000, ratePct: 7.9 }, { upTo: 225000, ratePct: 8.25 }, { upTo: 275000, ratePct: 9 }, { upTo: 325000, ratePct: 10 }, { upTo: null, ratePct: 11 }],
     bracketsMfj: [{ upTo: 19200, ratePct: 1.4 }, { upTo: 28800, ratePct: 3.2 }, { upTo: 38400, ratePct: 5.5 }, { upTo: 48000, ratePct: 6.4 }, { upTo: 72000, ratePct: 6.8 }, { upTo: 96000, ratePct: 7.2 }, { upTo: 250000, ratePct: 7.6 }, { upTo: 350000, ratePct: 7.9 }, { upTo: 450000, ratePct: 8.25 }, { upTo: 550000, ratePct: 9 }, { upTo: 650000, ratePct: 10 }, { upTo: null, ratePct: 11 }],
+    // HI Schedule III: HoH brackets are 1.5x the single schedule (Act 46, SLH 2024; HRS §235-51).
+    bracketsHoh: [{ upTo: 14400, ratePct: 1.4 }, { upTo: 21600, ratePct: 3.2 }, { upTo: 28800, ratePct: 5.5 }, { upTo: 36000, ratePct: 6.4 }, { upTo: 54000, ratePct: 6.8 }, { upTo: 72000, ratePct: 7.2 }, { upTo: 187500, ratePct: 7.6 }, { upTo: 262500, ratePct: 7.9 }, { upTo: 337500, ratePct: 8.25 }, { upTo: 412500, ratePct: 9 }, { upTo: 487500, ratePct: 10 }, { upTo: null, ratePct: 11 }],
     verified: true,
     sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
-    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source. HI standard deduction / exemption are 2025 amounts (the 2026 adjustment was not yet published).",
+    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source. HI 2026 standard deduction per Act 46, SLH 2024 (DOTAX Announcement 2024-03).",
     summary: "Hawaii taxes wages on a graduated scale — the rate rises as income rises, from 1.4% to a top rate of 11% in 2026. Twelve brackets — the most of any state.",
     withholdingNotes: [
-      "Hawaii taxes taxable income in 12 brackets — only the dollars inside each bracket are taxed at that bracket's rate. The calculator subtracts the $4,400 single standard deduction first. A further $1,144 personal exemption also applies.",
-      "Hawaii has 12 brackets — the most of any state. The standard deduction and exemption shown are 2025 amounts (the 2026 adjustment was not yet published).",
+      "Hawaii taxes taxable income in 12 brackets — only the dollars inside each bracket are taxed at that bracket's rate. The calculator subtracts the $8,000 single standard deduction first. A further $1,144 personal exemption also applies.",
+      "Hawaii has 12 brackets — the most of any state. The 2026 standard deduction is $8,000 single / $16,000 joint under Act 46, up from $4,400 / $8,800 in 2025.",
     ],
     localTaxNote: null,
   },
@@ -402,12 +772,16 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     flatRatePct: null,
     standardDeductionSingle: 16100,
     standardDeductionMfj: 32200,
+    standardDeductionHoh: 24150,
     exemptionSingle: null,
     exemptionMfj: null,
     creditSingle: null,
     creditMfj: null,
+    hohSupported: true,
     brackets: [{ upTo: 4811, ratePct: 0 }, { upTo: null, ratePct: 5.3 }],
     bracketsMfj: [{ upTo: 9622, ratePct: 0 }, { upTo: null, ratePct: 5.3 }],
+    // ID HoH uses the joint zero-band amount (Idaho Form 40 instructions).
+    bracketsHoh: [{ upTo: 9622, ratePct: 0 }, { upTo: null, ratePct: 5.3 }],
     verified: true,
     sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
     sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source.",
@@ -430,6 +804,8 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     exemptionMfj: null,
     creditSingle: null,
     creditMfj: null,
+    // IL HoH exemption is $2,925 (= single) — the single-schedule fallback applies.
+    hohSupported: true,
     brackets: null,
     bracketsMfj: null,
     verified: true,
@@ -453,17 +829,19 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     exemptionMfj: null,
     creditSingle: null,
     creditMfj: null,
+    // IN HoH exemption is $1,000 (= single) — the single-schedule fallback applies.
+    hohSupported: true,
     brackets: null,
     bracketsMfj: null,
     verified: true,
     sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
-    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source.",
+    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source. County rates per DOR Departmental Notice #1 (eff. Oct 1, 2026).",
     summary: "Indiana taxes income at a single flat rate of 2.95% in 2026. Cut from 3.00% on January 1, 2026.",
     withholdingNotes: [
       "Indiana's 2.95% flat rate applies to taxable income after the $1,000 personal exemption (single filer).",
       "The rate was cut to 2.95% on January 1, 2026, and is scheduled to fall to 2.90% on January 1, 2027.",
     ],
-    localTaxNote: "Every Indiana county adds its own local income tax (averaging roughly 0.35% of AGI) on top of the state rate.",
+    localTaxNote: "Every Indiana county adds its own local income tax (0.5% to 3.00% of AGI; Marion County, Indianapolis, is 2.02%) on top of the state rate.",
   },
   {
     slug: "iowa-paycheck-calculator",
@@ -473,18 +851,22 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     flatRatePct: 3.8,
     standardDeductionSingle: 16100,
     standardDeductionMfj: 32200,
+    standardDeductionHoh: 24150,
     exemptionSingle: null,
     exemptionMfj: null,
-    creditSingle: null,
-    creditMfj: null,
+    creditSingle: 40,
+    creditMfj: 80,
+    // IA-1040 Step 3: head of household enters 2 x $40.
+    creditHoh: 80,
+    hohSupported: true,
     brackets: null,
     bracketsMfj: null,
     verified: true,
     sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
-    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source.",
+    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source. $40 personal exemption credit per filer ($80 joint) per IA W-4 / IDR.",
     summary: "Iowa taxes income at a single flat rate of 3.8% in 2026.",
     withholdingNotes: [
-      "Iowa's 3.8% flat rate applies to every dollar of taxable income, after the $16,100 single standard deduction.",
+      "Iowa's 3.8% flat rate applies to every dollar of taxable income, after the $16,100 single standard deduction, then a $40 personal exemption credit off the tax ($80 joint).",
     ],
     localTaxNote: null,
   },
@@ -496,18 +878,24 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     flatRatePct: null,
     standardDeductionSingle: 3605,
     standardDeductionMfj: 8240,
-    exemptionSingle: null,
-    exemptionMfj: null,
+    standardDeductionHoh: 6180,
+    exemptionSingle: 9160,
+    exemptionMfj: 18320,
+    exemptionHoh: 11480,
     creditSingle: null,
     creditMfj: null,
+    // HoH uses the single bracket schedule (K.S.A. 79-32,110); the $11,480
+    // HoH exemption is the $9,160 base + the $2,320 additional HoH
+    // exemption (K.S.A. 79-32,121(b)(1), HB 2231).
+    hohSupported: true,
     brackets: [{ upTo: 23000, ratePct: 5.2 }, { upTo: null, ratePct: 5.58 }],
     bracketsMfj: [{ upTo: 46000, ratePct: 5.2 }, { upTo: null, ratePct: 5.58 }],
     verified: true,
     sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
-    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source.",
+    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source. Personal exemption $9,160 single / $18,320 joint per 2026 Form K-40ES.",
     summary: "Kansas taxes wages on a graduated scale — the rate rises as income rises, from 5.2% to a top rate of 5.58% in 2026.",
     withholdingNotes: [
-      "Kansas taxes taxable income in 2 brackets — only the dollars inside each bracket are taxed at that bracket's rate. The calculator subtracts the $3,605 single standard deduction first.",
+      "Kansas taxes taxable income in 2 brackets — only the dollars inside each bracket are taxed at that bracket's rate. The calculator subtracts the $3,605 single standard deduction and the $9,160 single personal exemption first.",
       "Kansas has just two brackets: 5.2% to $23,000 single, then 5.58%.",
     ],
     localTaxNote: null,
@@ -524,6 +912,8 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     exemptionMfj: null,
     creditSingle: null,
     creditMfj: null,
+    // KY HoH standard deduction is $3,360 (= single/MFJ) — flat rate, no brackets.
+    hohSupported: true,
     brackets: null,
     bracketsMfj: null,
     verified: true,
@@ -544,10 +934,12 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     flatRatePct: 3,
     standardDeductionSingle: 12875,
     standardDeductionMfj: 25750,
+    standardDeductionHoh: 25750,
     exemptionSingle: null,
     exemptionMfj: null,
     creditSingle: null,
     creditMfj: null,
+    hohSupported: true,
     brackets: null,
     bracketsMfj: null,
     verified: true,
@@ -566,20 +958,24 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     abbreviation: "ME",
     structure: "graduated",
     flatRatePct: null,
-    standardDeductionSingle: 8350,
-    standardDeductionMfj: 16700,
+    standardDeductionSingle: 15700,
+    standardDeductionMfj: 31400,
+    standardDeductionHoh: 23550,
     exemptionSingle: 5300,
     exemptionMfj: 10600,
+    exemptionHoh: 5300,
     creditSingle: null,
     creditMfj: null,
+    hohSupported: true,
     brackets: [{ upTo: 27399, ratePct: 5.8 }, { upTo: 64849, ratePct: 6.75 }, { upTo: null, ratePct: 7.15 }],
     bracketsMfj: [{ upTo: 54849, ratePct: 5.8 }, { upTo: 129749, ratePct: 6.75 }, { upTo: null, ratePct: 7.15 }],
+    bracketsHoh: [{ upTo: 41100, ratePct: 5.8 }, { upTo: 97300, ratePct: 6.75 }, { upTo: null, ratePct: 7.15 }],
     verified: true,
     sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
-    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source.",
+    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source. 2026 standard deduction per Maine Revenue Services 2026 Withholding Tables & Instructions (revised Aug 2026).",
     summary: "Maine taxes wages on a graduated scale — the rate rises as income rises, from 5.8% to a top rate of 7.15% in 2026.",
     withholdingNotes: [
-      "Maine taxes taxable income in 3 brackets — only the dollars inside each bracket are taxed at that bracket's rate. The calculator subtracts the $8,350 single standard deduction first. A further $5,300 personal exemption also applies.",
+      "Maine taxes taxable income in 3 brackets — only the dollars inside each bracket are taxed at that bracket's rate. The calculator subtracts the $15,700 single standard deduction first. A further $5,300 personal exemption also applies.",
       "The standard deduction phases out above $100,000 single / $200,050 joint Maine income.",
     ],
     localTaxNote: null,
@@ -596,15 +992,31 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     exemptionMfj: 6400,
     creditSingle: null,
     creditMfj: null,
+    hohSupported: false,
+    exemptionPhaseout: {
+      single: [
+        { upTo: 100000, perExemption: 3200 },
+        { upTo: 125000, perExemption: 1600 },
+        { upTo: 150000, perExemption: 800 },
+        { upTo: null, perExemption: 0 },
+      ],
+      joint: [
+        { upTo: 150000, perExemption: 3200 },
+        { upTo: 175000, perExemption: 1600 },
+        { upTo: 200000, perExemption: 800 },
+        { upTo: null, perExemption: 0 },
+      ],
+    },
     brackets: [{ upTo: 1000, ratePct: 2 }, { upTo: 2000, ratePct: 3 }, { upTo: 3000, ratePct: 4 }, { upTo: 100000, ratePct: 4.75 }, { upTo: 125000, ratePct: 5 }, { upTo: 150000, ratePct: 5.25 }, { upTo: 250000, ratePct: 5.5 }, { upTo: 500000, ratePct: 5.75 }, { upTo: 1000000, ratePct: 6.25 }, { upTo: null, ratePct: 6.5 }],
     bracketsMfj: [{ upTo: 1000, ratePct: 2 }, { upTo: 2000, ratePct: 3 }, { upTo: 3000, ratePct: 4 }, { upTo: 150000, ratePct: 4.75 }, { upTo: 175000, ratePct: 5 }, { upTo: 225000, ratePct: 5.25 }, { upTo: 300000, ratePct: 5.5 }, { upTo: 600000, ratePct: 5.75 }, { upTo: 1200000, ratePct: 6.25 }, { upTo: null, ratePct: 6.5 }],
     verified: true,
     sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
-    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source.",
+    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source. Personal-exemption phaseout per the 2026 Form PV Worksheet, Line 6 chart: single/MFS $3,200 to $100,000, then $1,600 / $800 / $0 at $125,000 / $150,000; joint/HoH keep the full $3,200 until $150,000, then $1,600 / $800 / $0 at $175,000 / $200,000.",
     summary: "Maryland taxes wages on a graduated scale — the rate rises as income rises, from 2% to a top rate of 6.5% in 2026.",
     withholdingNotes: [
       "Maryland taxes taxable income in 10 brackets — only the dollars inside each bracket are taxed at that bracket's rate. The calculator subtracts the $3,350 single standard deduction first. A further $3,200 personal exemption also applies.",
       "Two new top brackets (6.25% / 6.50%) were added retroactive to January 1, 2025. A 2% surtax on capital gains over $350,000 AGI does not affect wages.",
+      "The $3,200 personal exemption phases out as income rises — single filers lose it entirely above $150,000; joint filers keep the full amount until $150,000.",
     ],
     localTaxNote: "Maryland counties levy their own local income tax (averaging roughly 2.4% of AGI) on top of the state rate — the combined rate is what actually comes out of your paycheck.",
   },
@@ -620,6 +1032,7 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     exemptionMfj: null,
     creditSingle: null,
     creditMfj: null,
+    hohSupported: false,
     brackets: [{ upTo: 1083150, ratePct: 5 }, { upTo: null, ratePct: 9 }],
     bracketsMfj: [{ upTo: 1083150, ratePct: 5 }, { upTo: null, ratePct: 9 }],
     verified: true,
@@ -644,6 +1057,8 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     exemptionMfj: null,
     creditSingle: null,
     creditMfj: null,
+    // MI HoH exemption is $5,900 (= single) — the single-schedule fallback applies.
+    hohSupported: true,
     brackets: null,
     bracketsMfj: null,
     verified: true,
@@ -663,12 +1078,15 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     flatRatePct: null,
     standardDeductionSingle: 15300,
     standardDeductionMfj: 30600,
+    standardDeductionHoh: 23000,
     exemptionSingle: null,
     exemptionMfj: null,
     creditSingle: null,
     creditMfj: null,
+    hohSupported: true,
     brackets: [{ upTo: 33310, ratePct: 5.35 }, { upTo: 109430, ratePct: 6.8 }, { upTo: 203150, ratePct: 7.85 }, { upTo: null, ratePct: 9.85 }],
     bracketsMfj: [{ upTo: 48700, ratePct: 5.35 }, { upTo: 193480, ratePct: 6.8 }, { upTo: 337930, ratePct: 7.85 }, { upTo: null, ratePct: 9.85 }],
+    bracketsHoh: [{ upTo: 41010, ratePct: 5.35 }, { upTo: 164800, ratePct: 6.8 }, { upTo: 270060, ratePct: 7.85 }, { upTo: null, ratePct: 9.85 }],
     verified: true,
     sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
     sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source.",
@@ -691,6 +1109,7 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     exemptionMfj: 12000,
     creditSingle: null,
     creditMfj: null,
+    hohSupported: false,
     brackets: [{ upTo: 10000, ratePct: 0 }, { upTo: null, ratePct: 4 }],
     bracketsMfj: [{ upTo: 10000, ratePct: 0 }, { upTo: null, ratePct: 4 }],
     verified: true,
@@ -711,18 +1130,35 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     flatRatePct: null,
     standardDeductionSingle: 16100,
     standardDeductionMfj: 32200,
+    standardDeductionHoh: 24150,
     exemptionSingle: null,
     exemptionMfj: null,
     creditSingle: null,
     creditMfj: null,
+    // HoH uses the single bracket schedule (same for all statuses in MO);
+    // the federal-tax deduction cap for HoH stays $5,000 (capSingle).
+    hohSupported: true,
+    federalTaxDeduction: {
+      kind: "tiered",
+      tiers: [
+        { upTo: 25000, pct: 35 },
+        { upTo: 50000, pct: 25 },
+        { upTo: 100000, pct: 15 },
+        { upTo: 125000, pct: 5 },
+        { upTo: null, pct: 0 },
+      ],
+      capSingle: 5000,
+      capMfj: 10000,
+    },
     brackets: [{ upTo: 1348, ratePct: 0 }, { upTo: 2696, ratePct: 2 }, { upTo: 4044, ratePct: 2.5 }, { upTo: 5392, ratePct: 3 }, { upTo: 6740, ratePct: 3.5 }, { upTo: 8088, ratePct: 4 }, { upTo: 9436, ratePct: 4.5 }, { upTo: null, ratePct: 4.7 }],
     bracketsMfj: [{ upTo: 1348, ratePct: 0 }, { upTo: 2696, ratePct: 2 }, { upTo: 4044, ratePct: 2.5 }, { upTo: 5392, ratePct: 3 }, { upTo: 6740, ratePct: 3.5 }, { upTo: 8088, ratePct: 4 }, { upTo: 9436, ratePct: 4.5 }, { upTo: null, ratePct: 4.7 }],
     verified: true,
     sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
-    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source.",
+    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source. Federal-tax deduction per RSMo §143.171: 35% of federal tax at MO AGI up to $25,000, 25% to $50,000, 15% to $100,000, 5% to $125,000, 0% above — capped at $5,000 single / $10,000 joint.",
     summary: "Missouri taxes wages on a graduated scale — the rate rises as income rises, from 0% to a top rate of 4.7% in 2026.",
     withholdingNotes: [
       "Missouri taxes taxable income in 8 brackets — only the dollars inside each bracket are taxed at that bracket's rate. The calculator subtracts the $16,100 single standard deduction first.",
+      "Missouri lets you deduct part of your federal income tax — 35% at low incomes, phasing to 0% above $125,000. The calculator uses its own estimated federal liability for that line (an estimate, not your actual federal tax).",
     ],
     localTaxNote: "St. Louis and Kansas City levy a 1% earnings tax on wages earned in the city — separate from state withholding.",
   },
@@ -734,12 +1170,15 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     flatRatePct: null,
     standardDeductionSingle: 16100,
     standardDeductionMfj: 32200,
+    standardDeductionHoh: 24150,
     exemptionSingle: null,
     exemptionMfj: null,
     creditSingle: null,
     creditMfj: null,
+    hohSupported: true,
     brackets: [{ upTo: 47500, ratePct: 4.7 }, { upTo: null, ratePct: 5.65 }],
     bracketsMfj: [{ upTo: 95000, ratePct: 4.7 }, { upTo: null, ratePct: 5.65 }],
+    bracketsHoh: [{ upTo: 71250, ratePct: 4.7 }, { upTo: null, ratePct: 5.65 }],
     verified: true,
     sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
     sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source.",
@@ -758,12 +1197,16 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     flatRatePct: null,
     standardDeductionSingle: 8850,
     standardDeductionMfj: 17700,
+    standardDeductionHoh: 12950,
     exemptionSingle: null,
     exemptionMfj: null,
     creditSingle: 176,
     creditMfj: 352,
+    creditHoh: 176,
+    hohSupported: true,
     brackets: [{ upTo: 4130, ratePct: 2.46 }, { upTo: 24760, ratePct: 3.51 }, { upTo: null, ratePct: 4.55 }],
     bracketsMfj: [{ upTo: 8250, ratePct: 2.46 }, { upTo: 49530, ratePct: 3.51 }, { upTo: null, ratePct: 4.55 }],
+    bracketsHoh: [{ upTo: 7700, ratePct: 2.46 }, { upTo: 39620, ratePct: 3.51 }, { upTo: null, ratePct: 4.55 }],
     verified: true,
     sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
     sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source.",
@@ -779,6 +1222,7 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     state: "Nevada",
     abbreviation: "NV",
     structure: "none",
+    hohSupported: true,
     flatRatePct: null,
     standardDeductionSingle: null,
     standardDeductionMfj: null,
@@ -803,6 +1247,7 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     state: "New Hampshire",
     abbreviation: "NH",
     structure: "none",
+    hohSupported: true,
     flatRatePct: null,
     standardDeductionSingle: null,
     standardDeductionMfj: null,
@@ -830,12 +1275,16 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     flatRatePct: null,
     standardDeductionSingle: 1000,
     standardDeductionMfj: 2000,
+    standardDeductionHoh: 1000,
     exemptionSingle: null,
     exemptionMfj: null,
     creditSingle: null,
     creditMfj: null,
+    hohSupported: true,
     brackets: [{ upTo: 20000, ratePct: 1.4 }, { upTo: 35000, ratePct: 1.75 }, { upTo: 40000, ratePct: 3.5 }, { upTo: 75000, ratePct: 5.53 }, { upTo: 500000, ratePct: 6.37 }, { upTo: 1000000, ratePct: 8.97 }, { upTo: null, ratePct: 10.75 }],
     bracketsMfj: [{ upTo: 20000, ratePct: 1.4 }, { upTo: 50000, ratePct: 1.75 }, { upTo: 70000, ratePct: 2.45 }, { upTo: 80000, ratePct: 3.5 }, { upTo: 150000, ratePct: 5.53 }, { upTo: 500000, ratePct: 6.37 }, { upTo: 1000000, ratePct: 8.97 }, { upTo: null, ratePct: 10.75 }],
+    // NJ Table B: head of household uses the married-filing-jointly table (NJ-1040-ES).
+    bracketsHoh: [{ upTo: 20000, ratePct: 1.4 }, { upTo: 50000, ratePct: 1.75 }, { upTo: 70000, ratePct: 2.45 }, { upTo: 80000, ratePct: 3.5 }, { upTo: 150000, ratePct: 5.53 }, { upTo: 500000, ratePct: 6.37 }, { upTo: 1000000, ratePct: 8.97 }, { upTo: null, ratePct: 10.75 }],
     verified: true,
     sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
     sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source.",
@@ -859,11 +1308,12 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     exemptionMfj: null,
     creditSingle: null,
     creditMfj: null,
+    hohSupported: false,
     brackets: [{ upTo: 5500, ratePct: 1.5 }, { upTo: 16500, ratePct: 3.2 }, { upTo: 33500, ratePct: 4.3 }, { upTo: 66500, ratePct: 4.7 }, { upTo: 210000, ratePct: 4.9 }, { upTo: null, ratePct: 5.9 }],
     bracketsMfj: [{ upTo: 8000, ratePct: 1.5 }, { upTo: 25000, ratePct: 3.2 }, { upTo: 50000, ratePct: 4.3 }, { upTo: 100000, ratePct: 4.7 }, { upTo: 315000, ratePct: 4.9 }, { upTo: null, ratePct: 5.9 }],
     verified: true,
     sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
-    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source.",
+    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source. NM single standard deduction $16,100 is CORRECT — NM conforms to the federal standard deduction; the $8,050 figure in the FYI-104 withholding tables is the zero band, not the standard deduction. HoH standard deduction $24,150 is therefore known, but the HoH bracket schedule is unverified — HoH not modeled.",
     summary: "New Mexico taxes wages on a graduated scale — the rate rises as income rises, from 1.5% to a top rate of 5.9% in 2026.",
     withholdingNotes: [
       "New Mexico taxes taxable income in 6 brackets — only the dollars inside each bracket are taxed at that bracket's rate. The calculator subtracts the $16,100 single standard deduction first.",
@@ -879,12 +1329,15 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     flatRatePct: null,
     standardDeductionSingle: 8000,
     standardDeductionMfj: 16050,
+    standardDeductionHoh: 11200,
     exemptionSingle: null,
     exemptionMfj: null,
     creditSingle: null,
     creditMfj: null,
+    hohSupported: true,
     brackets: [{ upTo: 8500, ratePct: 3.9 }, { upTo: 11700, ratePct: 4.4 }, { upTo: 13900, ratePct: 5.15 }, { upTo: 80650, ratePct: 5.4 }, { upTo: 215400, ratePct: 5.9 }, { upTo: 1077550, ratePct: 6.85 }, { upTo: 5000000, ratePct: 9.65 }, { upTo: 25000000, ratePct: 10.3 }, { upTo: null, ratePct: 10.9 }],
     bracketsMfj: [{ upTo: 17150, ratePct: 3.9 }, { upTo: 23600, ratePct: 4.4 }, { upTo: 27900, ratePct: 5.15 }, { upTo: 161550, ratePct: 5.4 }, { upTo: 323200, ratePct: 5.9 }, { upTo: 2155350, ratePct: 6.85 }, { upTo: 5000000, ratePct: 9.65 }, { upTo: 25000000, ratePct: 10.3 }, { upTo: null, ratePct: 10.9 }],
+    bracketsHoh: [{ upTo: 12800, ratePct: 3.9 }, { upTo: 17650, ratePct: 4.4 }, { upTo: 20900, ratePct: 5.15 }, { upTo: 107650, ratePct: 5.4 }, { upTo: 269300, ratePct: 5.9 }, { upTo: 1616450, ratePct: 6.85 }, { upTo: 5000000, ratePct: 9.65 }, { upTo: 25000000, ratePct: 10.3 }, { upTo: null, ratePct: 10.9 }],
     verified: true,
     sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
     sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source.",
@@ -904,10 +1357,12 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     flatRatePct: 3.99,
     standardDeductionSingle: 12750,
     standardDeductionMfj: 25500,
+    standardDeductionHoh: 19125,
     exemptionSingle: null,
     exemptionMfj: null,
     creditSingle: null,
     creditMfj: null,
+    hohSupported: true,
     brackets: null,
     bracketsMfj: null,
     verified: true,
@@ -928,19 +1383,22 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     flatRatePct: null,
     standardDeductionSingle: 16100,
     standardDeductionMfj: 32200,
+    standardDeductionHoh: 24150,
     exemptionSingle: null,
     exemptionMfj: null,
     creditSingle: null,
     creditMfj: null,
-    brackets: [{ upTo: 48475, ratePct: 0 }, { upTo: 244825, ratePct: 1.95 }, { upTo: null, ratePct: 2.5 }],
-    bracketsMfj: [{ upTo: 80975, ratePct: 0 }, { upTo: 298075, ratePct: 1.95 }, { upTo: null, ratePct: 2.5 }],
+    hohSupported: true,
+    brackets: [{ upTo: 49575, ratePct: 0 }, { upTo: 250400, ratePct: 1.95 }, { upTo: null, ratePct: 2.5 }],
+    bracketsMfj: [{ upTo: 82800, ratePct: 0 }, { upTo: 304850, ratePct: 1.95 }, { upTo: null, ratePct: 2.5 }],
+    bracketsHoh: [{ upTo: 66400, ratePct: 0 }, { upTo: 277600, ratePct: 1.95 }, { upTo: null, ratePct: 2.5 }],
     verified: true,
     sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
-    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source.",
+    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source. 2026 thresholds per 2026 Form ND-1ES (Office of State Tax Commissioner).",
     summary: "North Dakota taxes wages on a graduated scale — the rate rises as income rises, from 0% to a top rate of 2.5% in 2026. The lowest top rate of any state that taxes income.",
     withholdingNotes: [
       "North Dakota taxes taxable income in 3 brackets — only the dollars inside each bracket are taxed at that bracket's rate. The calculator subtracts the $16,100 single standard deduction first.",
-      "North Dakota has the lowest top rate of any state that taxes income — and no tax on the first $48,475 single / $80,975 joint of taxable income.",
+      "North Dakota has the lowest top rate of any state that taxes income — and no tax on the first $49,575 single / $82,800 joint of taxable income.",
     ],
     localTaxNote: null,
   },
@@ -956,11 +1414,12 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     exemptionMfj: null,
     creditSingle: null,
     creditMfj: null,
-    brackets: [{ upTo: 26050, ratePct: 0 }, { upTo: null, ratePct: 2.75 }],
-    bracketsMfj: [{ upTo: 26050, ratePct: 0 }, { upTo: null, ratePct: 2.75 }],
+    hohSupported: false,
+    brackets: [{ upTo: 26050, ratePct: 0 }, { upTo: null, ratePct: 2.75, base: 332 }],
+    bracketsMfj: [{ upTo: 26050, ratePct: 0 }, { upTo: null, ratePct: 2.75, base: 332 }],
     verified: true,
     sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
-    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source.",
+    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source. $332 step per ORC 5747.02(A)(3)(c): tax is $332 plus 2.75% of the amount over $26,050.",
     summary: "Ohio taxes wages on a graduated scale — the rate rises as income rises, from 0% to a top rate of 2.75% in 2026.",
     withholdingNotes: [
       "Ohio taxes taxable income in 2 brackets — only the dollars inside each bracket are taxed at that bracket's rate. The calculator subtracts the $2,400 personal exemption (single filer) first.",
@@ -976,12 +1435,17 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     flatRatePct: null,
     standardDeductionSingle: 6350,
     standardDeductionMfj: 12700,
+    standardDeductionHoh: 9350,
     exemptionSingle: 1000,
     exemptionMfj: 2000,
+    exemptionHoh: 1000,
     creditSingle: null,
     creditMfj: null,
+    hohSupported: true,
     brackets: [{ upTo: 3750, ratePct: 0 }, { upTo: 4900, ratePct: 2.5 }, { upTo: 7200, ratePct: 3.5 }, { upTo: null, ratePct: 4.5 }],
     bracketsMfj: [{ upTo: 7500, ratePct: 0 }, { upTo: 9800, ratePct: 2.5 }, { upTo: 14400, ratePct: 3.5 }, { upTo: null, ratePct: 4.5 }],
+    // OK HoH uses the doubled (joint) schedule (HB 2764, 68 O.S. §2355).
+    bracketsHoh: [{ upTo: 7500, ratePct: 0 }, { upTo: 9800, ratePct: 2.5 }, { upTo: 14400, ratePct: 3.5 }, { upTo: null, ratePct: 4.5 }],
     verified: true,
     sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
     sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source.",
@@ -1002,17 +1466,30 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     standardDeductionMfj: 5820,
     exemptionSingle: null,
     exemptionMfj: null,
-    creditSingle: 256,
-    creditMfj: 512,
+    creditSingle: 263,
+    creditMfj: 526,
+    hohSupported: false,
+    federalTaxDeduction: {
+      kind: "cappedPhased",
+      capSingle: 8750,
+      capMfj: 8750,
+      capMfs: 4375,
+      phaseoutStartSingle: 125000,
+      phaseoutStartJoint: 250000,
+      stepSizeSingle: 5000,
+      stepSizeJoint: 10000,
+      stepAmount: 1750,
+    },
+    creditAgiLimit: { single: 100000, joint: 200000 },
     brackets: [{ upTo: 4550, ratePct: 4.75 }, { upTo: 11400, ratePct: 6.75 }, { upTo: 125000, ratePct: 8.75 }, { upTo: null, ratePct: 9.9 }],
     bracketsMfj: [{ upTo: 9100, ratePct: 4.75 }, { upTo: 22800, ratePct: 6.75 }, { upTo: 250000, ratePct: 8.75 }, { upTo: null, ratePct: 9.9 }],
     verified: true,
     sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
-    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source.",
+    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source. 2026 exemption credit $263 per allowance per OR DOR Withholding Tax Formulas 150-206-436 (Rev. 12-31-25) — $263 is the final indexed figure (ORS 316.085 CPI computation); $260 was the Oct 2025 OR-ESTIMATE preliminary estimate and $256 the 2025 credit. The credit is $0 when federal AGI exceeds $100,000 single/MFS or $200,000 MFJ/HoH (ORS 316.085(5)). Federal-tax subtraction per 2026 Publication OR-ESTIMATE line 9 / OR-17: federal liability deductible up to $8,750 ($4,375 MFS), phasing out $1,750 per $5,000 band above $125,000 federal AGI single/MFS ($0 at $145,000) and per $10,000 band above $250,000 MFJ/HoH ($0 at $290,000). Head of household: SD ≈ $4,685 and the HoH bracket schedule are unverified — HoH not modeled.",
     summary: "Oregon taxes wages on a graduated scale — the rate rises as income rises, from 4.75% to a top rate of 9.9% in 2026.",
     withholdingNotes: [
       "Oregon taxes taxable income in 4 brackets — only the dollars inside each bracket are taxed at that bracket's rate. The calculator subtracts the $2,910 single standard deduction first.",
-      "Oregon lets you deduct federal income tax paid (capped).",
+      "Oregon lets you deduct federal income tax paid — capped at $8,750, phasing out above $125,000 federal AGI ($250,000 joint).",
     ],
     localTaxNote: "Portland and Multnomah County levy local taxes on wages — separate from state withholding.",
   },
@@ -1028,6 +1505,8 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     exemptionMfj: null,
     creditSingle: null,
     creditMfj: null,
+    // PA has no standard deduction or exemption — HoH is trivially the single (flat) treatment.
+    hohSupported: true,
     brackets: null,
     bracketsMfj: null,
     verified: true,
@@ -1052,6 +1531,7 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     exemptionMfj: 10500,
     creditSingle: null,
     creditMfj: null,
+    hohSupported: false,
     brackets: [{ upTo: 82050, ratePct: 3.75 }, { upTo: 186450, ratePct: 4.75 }, { upTo: null, ratePct: 5.99 }],
     bracketsMfj: [{ upTo: 82050, ratePct: 3.75 }, { upTo: 186450, ratePct: 4.75 }, { upTo: null, ratePct: 5.99 }],
     verified: true,
@@ -1070,21 +1550,31 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     abbreviation: "SC",
     structure: "graduated",
     flatRatePct: null,
-    standardDeductionSingle: 8350,
-    standardDeductionMfj: 16700,
+    standardDeductionSingle: 15000,
+    standardDeductionMfj: 30000,
+    standardDeductionHoh: 22500,
     exemptionSingle: null,
     exemptionMfj: null,
     creditSingle: null,
     creditMfj: null,
-    brackets: [{ upTo: 3640, ratePct: 0 }, { upTo: 18230, ratePct: 3 }, { upTo: null, ratePct: 6.2 }],
-    bracketsMfj: [{ upTo: 3640, ratePct: 0 }, { upTo: 18230, ratePct: 3 }, { upTo: null, ratePct: 6.2 }],
+    // SC uses ONE schedule for all filing statuses (H. 4216 / Act 110 of
+    // 2026); the sciadPhaseout HoH leg above carries the $22,500 SCIAD.
+    hohSupported: true,
+    sciadPhaseout: {
+      single: { base: 15000, threshold: 40000, span: 55000 },
+      marriedFilingJointly: { base: 30000, threshold: 80000, span: 110000 },
+      headOfHousehold: { base: 22500, threshold: 60000, span: 82500 },
+      marriedFilingSeparately: { base: 15000, threshold: 40000, span: 55000 },
+    },
+    brackets: [{ upTo: 30000, ratePct: 1.99 }, { upTo: null, ratePct: 5.21 }],
+    bracketsMfj: [{ upTo: 30000, ratePct: 1.99 }, { upTo: null, ratePct: 5.21 }],
     verified: true,
     sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
-    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source. SC top rate is 6% through Jun 30, 2026 and 6.2% from Jul 1, 2026 — the calculator uses the 6.2% rate current paychecks withhold.",
-    summary: "South Carolina taxes wages on a graduated scale — the rate rises as income rises, from 0% to a top rate of 6.2% in 2026.",
+    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source. SC 2026 law per H. 4216 (signed Mar 30, 2026): 1.99% under $30,000, 5.21% at/above minus $966; SCIAD $15,000 single / $30,000 joint replaces the federal standard deduction. SCIAD phaseout per SCDOR Information Letter #26-20 (Aug 31, 2026): single $15,000 phases out $40,000–$95,000; joint $30,000 phases out $80,000–$190,000; HoH $22,500 phases out $60,000–$142,500; reductions rounded down to the next $10.",
+    summary: "South Carolina taxes wages on a graduated scale — the rate rises as income rises, from 1.99% to a top rate of 5.21% in 2026.",
     withholdingNotes: [
-      "South Carolina taxes taxable income in 3 brackets — only the dollars inside each bracket are taxed at that bracket's rate. The calculator subtracts the $8,350 single standard deduction first.",
-      "Mid-year change: the top rate is 6% through June 30, 2026 and 6.2% from July 1, 2026. This calculator uses the 6.2% rate — what current paychecks withhold. A full-year 2026 return blends the two halves.",
+      "South Carolina taxes taxable income in 2 rates under H. 4216 — 1.99% under $30,000, 5.21% minus $966 at and above. The calculator subtracts the $15,000 SCIAD (single filer) first.",
+      "H. 4216 supersedes the old 0%/3%/6.2% schedule for the 2026 return. The SCIAD phases out as income rises — single filers lose it entirely at $95,000 — with reductions rounded down to the next $10.",
     ],
     localTaxNote: null,
   },
@@ -1093,6 +1583,7 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     state: "South Dakota",
     abbreviation: "SD",
     structure: "none",
+    hohSupported: true,
     flatRatePct: null,
     standardDeductionSingle: null,
     standardDeductionMfj: null,
@@ -1117,6 +1608,7 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     state: "Tennessee",
     abbreviation: "TN",
     structure: "none",
+    hohSupported: true,
     flatRatePct: null,
     standardDeductionSingle: null,
     standardDeductionMfj: null,
@@ -1141,6 +1633,7 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     state: "Texas",
     abbreviation: "TX",
     structure: "none",
+    hohSupported: true,
     flatRatePct: null,
     standardDeductionSingle: null,
     standardDeductionMfj: null,
@@ -1166,22 +1659,33 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     state: "Utah",
     abbreviation: "UT",
     structure: "flat",
-    flatRatePct: 4.5,
+    flatRatePct: 4.45,
     standardDeductionSingle: 0,
     standardDeductionMfj: 0,
     exemptionSingle: null,
     exemptionMfj: null,
     creditSingle: 966,
     creditMfj: 1932,
+    creditHoh: 1449,
+    hohSupported: true,
+    creditPhaseout: {
+      ratePerDollar: 0.013,
+      bases: {
+        single: 18696,
+        marriedFilingJointly: 37392,
+        headOfHousehold: 28045,
+        marriedFilingSeparately: 18696,
+      },
+    },
     brackets: null,
     bracketsMfj: null,
     verified: true,
     sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
-    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source.",
-    summary: "Utah taxes income at a single flat rate of 4.5% in 2026. Utah pairs its flat rate with a 6% credit instead of a standard deduction.",
+    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source. 2026 rate per S.B. 60 (Laws of Utah 2026, Ch. 250, signed Mar 23, 2026, retroactive Jan 1, 2026). Taxpayer credit 6% of the federal standard deduction ($966 single / $1,932 joint / $1,449 HoH) per Utah Code §59-10-1018, reduced $0.013 per $1 of Utah taxable income over the indexed 2026 base (single/MFS $18,696, HoH $28,045, MFJ $37,392 — UT Legislature Revenue & Taxation Interim Committee, 2026 Tax Credit Review, Sep 16, 2026); credit $0 at ≈ $93,004 taxable income single.",
+    summary: "Utah taxes income at a single flat rate of 4.45% in 2026. Utah pairs its flat rate with a 6% credit instead of a standard deduction.",
     withholdingNotes: [
-      "Utah's 4.5% flat rate applies to taxable income. Utah has no standard deduction — instead it gives a nonrefundable credit of 6% of the federal standard deduction ($966 single / $1,932 joint).",
-      "Utah has no standard deduction as a dollar amount. Instead it gives a nonrefundable credit of 6% of the federal standard deduction — $966 single / $1,932 joint for 2026 — applied after the 4.5% rate. The credit phases out at higher incomes.",
+      "Utah's 4.45% flat rate applies to taxable income. Utah has no standard deduction — instead it gives a nonrefundable credit of 6% of the federal standard deduction ($966 single / $1,932 joint).",
+      "Utah has no standard deduction as a dollar amount. Instead it gives a nonrefundable credit of 6% of the federal standard deduction — $966 single / $1,932 joint for 2026 — applied after the 4.45% rate. The credit phases out at higher incomes.",
     ],
     localTaxNote: null,
   },
@@ -1197,6 +1701,7 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     exemptionMfj: 10600,
     creditSingle: null,
     creditMfj: null,
+    hohSupported: false,
     brackets: [{ upTo: 49400, ratePct: 3.35 }, { upTo: 119700, ratePct: 6.6 }, { upTo: 249700, ratePct: 7.6 }, { upTo: null, ratePct: 8.75 }],
     bracketsMfj: [{ upTo: 82500, ratePct: 3.35 }, { upTo: 199450, ratePct: 6.6 }, { upTo: 304000, ratePct: 7.6 }, { upTo: null, ratePct: 8.75 }],
     verified: true,
@@ -1221,6 +1726,7 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     exemptionMfj: 1860,
     creditSingle: null,
     creditMfj: null,
+    hohSupported: false,
     brackets: [{ upTo: 3000, ratePct: 2 }, { upTo: 5000, ratePct: 3 }, { upTo: 17000, ratePct: 5 }, { upTo: null, ratePct: 5.75 }],
     bracketsMfj: [{ upTo: 3000, ratePct: 2 }, { upTo: 5000, ratePct: 3 }, { upTo: 17000, ratePct: 5 }, { upTo: null, ratePct: 5.75 }],
     verified: true,
@@ -1238,6 +1744,7 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     state: "Washington",
     abbreviation: "WA",
     structure: "none",
+    hohSupported: true,
     flatRatePct: null,
     standardDeductionSingle: null,
     standardDeductionMfj: null,
@@ -1270,12 +1777,13 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     exemptionMfj: null,
     creditSingle: null,
     creditMfj: null,
-    brackets: [{ upTo: 10000, ratePct: 2.22 }, { upTo: 25000, ratePct: 2.96 }, { upTo: 40000, ratePct: 3.33 }, { upTo: 60000, ratePct: 4.44 }, { upTo: null, ratePct: 4.82 }],
-    bracketsMfj: [{ upTo: 10000, ratePct: 2.22 }, { upTo: 25000, ratePct: 2.96 }, { upTo: 40000, ratePct: 3.33 }, { upTo: 60000, ratePct: 4.44 }, { upTo: null, ratePct: 4.82 }],
+    hohSupported: false,
+    brackets: [{ upTo: 10000, ratePct: 2.11 }, { upTo: 25000, ratePct: 2.81 }, { upTo: 40000, ratePct: 3.16 }, { upTo: 60000, ratePct: 4.22 }, { upTo: null, ratePct: 4.58 }],
+    bracketsMfj: [{ upTo: 10000, ratePct: 2.11 }, { upTo: 25000, ratePct: 2.81 }, { upTo: 40000, ratePct: 3.16 }, { upTo: 60000, ratePct: 4.22 }, { upTo: null, ratePct: 4.58 }],
     verified: true,
     sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
-    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source.",
-    summary: "West Virginia taxes wages on a graduated scale — the rate rises as income rises, from 2.22% to a top rate of 4.82% in 2026.",
+    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source. 2026 rates per SB 392 (signed Mar 31, 2026, retroactive Jan 1, 2026): every rate cut 5%.",
+    summary: "West Virginia taxes wages on a graduated scale — the rate rises as income rises, from 2.11% to a top rate of 4.58% in 2026.",
     withholdingNotes: [
       "West Virginia taxes taxable income in 5 brackets — only the dollars inside each bracket are taxed at that bracket's rate. The calculator subtracts the $2,000 personal exemption (single filer) first.",
     ],
@@ -1289,19 +1797,31 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     flatRatePct: null,
     standardDeductionSingle: 13960,
     standardDeductionMfj: 25840,
+    standardDeductionHoh: 18030,
+    standardDeductionMfs: 12280,
     exemptionSingle: 700,
     exemptionMfj: 1400,
     creditSingle: null,
     creditMfj: null,
+    // WI HoH uses the single bracket schedule (2026 Form 1-ES) with its
+    // own $18,030 standard deduction; the sdPhaseout HoH leg above carries
+    // the 22.515% taper to $58,827, then the single formula.
+    hohSupported: true,
+    sdPhaseout: {
+      single: { base: 13960, threshold: 20120, ratePct: 12 },
+      marriedFilingJointly: { base: 25840, threshold: 29040, ratePct: 19.778 },
+      marriedFilingSeparately: { base: 12280, threshold: 13780, ratePct: 19.778 },
+      headOfHousehold: { base: 18030, threshold: 20120, ratePct: 22.515, segmentEnd: 58827 },
+    },
     brackets: [{ upTo: 15110, ratePct: 3.5 }, { upTo: 51950, ratePct: 4.4 }, { upTo: 332720, ratePct: 5.3 }, { upTo: null, ratePct: 7.65 }],
     bracketsMfj: [{ upTo: 20150, ratePct: 3.5 }, { upTo: 69260, ratePct: 4.4 }, { upTo: 443630, ratePct: 5.3 }, { upTo: null, ratePct: 7.65 }],
     verified: true,
     sourceUrl: "https://taxfoundation.org/data/all/state/state-income-tax-rates-2026/",
-    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source.",
+    sourceNote: "Verified 15 Nov 2026 against the Tax Foundation's 2026 state tax tables (compiled from state statutes, forms and instructions as of Jan 1, 2026), cross-checked against a second source. Standard-deduction phaseout per 2026 Form 1-ES: single $13,960 less 12% of Wisconsin income over $20,120 ($0 at $136,453); joint $25,840 less 19.778% over $29,040 ($0 at $159,690); MFS $12,280 less 19.778% over $13,780 ($0 at $75,869); HoH $18,030 less 22.515% over $20,120 to $58,827, then the single formula.",
     summary: "Wisconsin taxes wages on a graduated scale — the rate rises as income rises, from 3.5% to a top rate of 7.65% in 2026.",
     withholdingNotes: [
       "Wisconsin taxes taxable income in 4 brackets — only the dollars inside each bracket are taxed at that bracket's rate. The calculator subtracts the $13,960 single standard deduction first. A further $700 personal exemption also applies.",
-      "The standard deduction phases out starting at $20,119 single / $29,039 joint income.",
+      "The standard deduction is a sliding scale: single filers keep the full $13,960 only to $20,119 of Wisconsin income, then lose 12% of the excess, reaching $0 at $136,453. Joint filers phase out at 19.778% from $29,040 ($0 at $159,690); heads of household start at $18,030 and phase out at 22.515% until the single schedule takes over at $58,827.",
     ],
     localTaxNote: null,
   },
@@ -1310,6 +1830,7 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     state: "Wyoming",
     abbreviation: "WY",
     structure: "none",
+    hohSupported: true,
     flatRatePct: null,
     standardDeductionSingle: null,
     standardDeductionMfj: null,
@@ -1729,6 +2250,65 @@ export const STATE_INSURANCE_PROGRAMS: Record<
       note: "Maximum employee share — your employer may cover part of it.",
     },
   ],
+  "alaska-paycheck-calculator": [
+    {
+      id: "ak-ui",
+      label: "Alaska Unemployment Insurance",
+      ratePct: 0.5,
+      wageCap: 54200,
+      contributionCap: null,
+      weeklyCap: null,
+      base: "gross",
+      sourceUrl: "https://labor.alaska.gov/estax/2026-experience-rates.html",
+      sourceNote:
+        "Verified 15 Nov 2026: AK DOL&WD 2026 employee UI rate 0.50% on the first $54,200 of wages (max $271/yr). Employee-paid UI is unusual — only AK, NJ and PA withhold it from the employee. Alaska has no state income tax, so this is the only state line on an Alaska paycheck.",
+    },
+  ],
+  "pennsylvania-paycheck-calculator": [
+    {
+      id: "pa-uc",
+      label: "PA Unemployment Compensation",
+      ratePct: 0.07,
+      wageCap: null,
+      contributionCap: null,
+      weeklyCap: null,
+      base: "gross",
+      sourceUrl:
+        "https://www.pa.gov/agencies/dli/resources/for-employers-and-educators/how-to-file/uc-tax/employee-withholding",
+      sourceNote:
+        "Verified 15 Nov 2026: PA DLI 2026 employee UC withholding 0.07% of total gross wages (70 cents per $1,000), NO wage cap — the $10,000 wage base is employer-side only. Applies to all employees, including 401(k) deferrals.",
+    },
+  ],
+  "maine-paycheck-calculator": [
+    {
+      id: "me-pfml",
+      label: "ME Paid Family & Medical Leave",
+      ratePct: 0.5,
+      wageCap: 184500,
+      contributionCap: null,
+      weeklyCap: null,
+      base: "fica",
+      sourceUrl: "https://www.maine.gov/paidleave/",
+      sourceNote:
+        "Verified 15 Nov 2026: ME PFML total 1% of wages up to the Social Security cap ($184,500) for 2026 — employers with 15+ employees contribute 1% and may deduct up to half (0.5%) from the employee; employers under 15 contribute 0.5% and may deduct it all. No more than 0.5% ever comes from the employee, so the modeled line is the maximum employee share. Contributions began Jan 1, 2025; benefits began May 1, 2026 (MDOL).",
+      note: "Maximum employee share — your employer may cover part of it.",
+    },
+  ],
+  "delaware-paycheck-calculator": [
+    {
+      id: "de-paid-leave",
+      label: "DE Paid Leave",
+      ratePct: 0.4,
+      wageCap: 184500,
+      contributionCap: null,
+      weeklyCap: null,
+      base: "fica",
+      sourceUrl: "https://labor.delaware.gov/delaware-paid-leave/",
+      sourceNote:
+        "Verified 15 Nov 2026: DE Paid Leave total 0.8% of wages (medical 0.4% + parental 0.32% + family caregiving 0.08%), employers may deduct up to half — modeled line is the 25+ employee maximum employee share 0.4% up to the Social Security cap ($184,500). Employers with 10–24 employees owe parental leave only (0.16% max employee share); under 10 are exempt. Contributions began Jan 1, 2025; benefits began Jan 1, 2026 (DE DOL, Healthy Delaware Families Act, 19 Del. C. Ch. 37).",
+      note: "Maximum employee share (25+ employees) — smaller employers pay less, and your employer may cover part of it.",
+    },
+  ],
 };
 
 /**
@@ -1773,6 +2353,291 @@ export function estimateStateInsurance(
 
 // ---- Pluggable state withholding estimate ----
 
+// ---- Per-state adjustment helpers (round-4 friend audit, 15 Nov 2026) ----
+
+/**
+ * Alabama-style stepped standard deduction (ALDOR Withholding Tax Tables
+ * and Instructions, Rev. Jan 2026): full base at or below the threshold,
+ * then reductionPerStep for each stepSize (or fraction thereof) of income
+ * over the threshold, floored at `floor`. Income here is annual GROSS.
+ */
+export function phaseDownStandardDeduction(
+  leg: SdPhaseDownLeg,
+  grossIncome: number,
+): number {
+  if (grossIncome <= leg.threshold) return leg.base;
+  const steps = Math.ceil((grossIncome - leg.threshold) / leg.stepSize);
+  return Math.max(leg.floor, leg.base - steps * leg.reductionPerStep);
+}
+
+/**
+ * Wisconsin-style percentage standard deduction (2026 Form 1-ES): full
+ * base at or below the threshold, then ratePct% of income over the
+ * threshold, floored at $0. Head of household uses its own rate up to
+ * segmentEnd, then the single leg's formula.
+ */
+export function phaseoutStandardDeduction(
+  status: FilingStatus,
+  income: number,
+  rule: SdPhaseoutRule,
+): number {
+  const linear = (leg: SdPhaseoutLeg): number =>
+    Math.max(
+      0,
+      leg.base - (leg.ratePct / 100) * Math.max(0, income - leg.threshold),
+    );
+  if (status === "headOfHousehold") {
+    const hoh = rule.headOfHousehold;
+    if (income <= hoh.segmentEnd) return linear(hoh);
+    return linear(rule.single);
+  }
+  const leg =
+    status === "marriedFilingJointly"
+      ? rule.marriedFilingJointly
+      : status === "marriedFilingSeparately"
+        ? rule.marriedFilingSeparately
+        : rule.single;
+  return linear(leg);
+}
+
+/**
+ * Federal income-tax deduction (AL full; MO §143.171 tiered; OR capped +
+ * phased). Input is the engine's computed federal liability — an ESTIMATE,
+ * not observed withholding. `agi` is the AGI proxy (stateTaxableBase);
+ * unused for the "full" kind.
+ */
+export function federalTaxDeductionAmount(
+  rule: FederalTaxDeductionRule,
+  agi: number,
+  federalLiability: number,
+  filingStatus: FilingStatus,
+): number {
+  if (rule.kind === "full") return Math.max(0, federalLiability);
+  if (rule.kind === "cappedPhased") {
+    const isJoint =
+      filingStatus === "marriedFilingJointly" ||
+      filingStatus === "headOfHousehold";
+    const capBase =
+      filingStatus === "marriedFilingSeparately"
+        ? rule.capMfs
+        : isJoint
+          ? rule.capMfj
+          : rule.capSingle;
+    const start = isJoint
+      ? rule.phaseoutStartJoint
+      : rule.phaseoutStartSingle;
+    const stepSize = isJoint ? rule.stepSizeJoint : rule.stepSizeSingle;
+    let cap = capBase;
+    // The phaseout bands are lower-bound inclusive: at AGI exactly equal
+    // to the start ($125,000 single / $250,000 joint) the cap is already
+    // one step down ($7,000), per the OR-ESTIMATE / OR-17 band table.
+    if (agi >= start) {
+      const steps = Math.floor((agi - start) / stepSize) + 1;
+      cap = Math.max(0, capBase - steps * rule.stepAmount);
+    }
+    return Math.min(cap, Math.max(0, federalLiability));
+  }
+  const tier = rule.tiers.find((t) => t.upTo === null || agi <= t.upTo);
+  const pct = tier ? tier.pct : 0;
+  const cap =
+    filingStatus === "marriedFilingJointly" ? rule.capMfj : rule.capSingle;
+  return Math.min(cap, (Math.max(0, federalLiability) * pct) / 100);
+}
+
+/**
+ * Utah taxpayer credit after phaseout (Utah Code §59-10-1018): the base
+ * credit (6% of the federal standard deduction) less $0.013 per $1 of
+ * Utah taxable income over the indexed base, floored at $0.
+ */
+export function utahTaxpayerCredit(
+  rule: CreditPhaseoutRule,
+  status: FilingStatus,
+  utahTaxableIncome: number,
+  baseCredit: number,
+): number {
+  const excess = Math.max(0, utahTaxableIncome - rule.bases[status]);
+  return Math.max(0, baseCredit - rule.ratePerDollar * excess);
+}
+
+/**
+ * Connecticut Table C add-back (2026 CT-1040ES): $step per bandWidth (or
+ * part) of CT AGI over the threshold, capped at max.
+ */
+export function connecticutTableC(
+  leg: ConnecticutTableCLeg,
+  agi: number,
+): number {
+  if (agi <= leg.threshold) return 0;
+  return Math.min(
+    leg.max,
+    leg.step * Math.ceil((agi - leg.threshold) / leg.bandWidth),
+  );
+}
+
+/**
+ * Connecticut Table D recapture (2026 CT-1040ES): two stepped climbs
+ * separated by flat plateaus, then a final climb capped at p3Max.
+ */
+export function connecticutTableD(
+  leg: ConnecticutTableDLeg,
+  agi: number,
+): number {
+  if (agi <= leg.p1Threshold) return 0;
+  if (agi <= leg.p1SteppedUpTo)
+    return leg.p1Step * Math.ceil((agi - leg.p1Threshold) / leg.p1Width);
+  if (agi <= leg.p1FlatUpTo) return leg.p1Flat;
+  if (agi <= leg.p2SteppedUpTo)
+    return (
+      leg.p1Flat + leg.p2Step * Math.ceil((agi - leg.p2Start) / leg.p2Width)
+    );
+  if (agi <= leg.p2FlatUpTo) return leg.p2Flat;
+  return Math.min(
+    leg.p3Max,
+    leg.p2Flat + leg.p3Step * Math.ceil((agi - leg.p3Start) / leg.p3Width),
+  );
+}
+
+/** Connecticut Table E personal-credit rate for a CT AGI. */
+export function connecticutTableE(
+  bands: ConnecticutTableEBand[],
+  agi: number,
+): number {
+  for (const b of bands) {
+    if (b.upTo === null || agi <= b.upTo) return b.rate;
+  }
+  return 0;
+}
+
+/**
+ * Connecticut Tax Calculation Schedule (2026 CT-1040ES Tables A–E).
+ * Income measure for every table is CT AGI — the engine's proxy is
+ * stateTaxableBase (gross minus the pre-tax deductions CT excludes).
+ * Table A phases the personal exemption out $1,000 per $1,000 of AGI
+ * over the threshold (the $1,000 at exactly $44,000 single is real — the
+ * exemption hits $0 only ABOVE $44,000); Table B is the ordinary
+ * brackets on taxable income; Tables C + D add back on top; Table E is
+ * a credit percentage of (Table B + C + D). Connecticut has no standard
+ * deduction — effectiveStandardDeduction is $0.
+ */
+export function connecticutTax(
+  state: StateTaxInfo,
+  filingStatus: FilingStatus,
+  agi: number,
+): StateEstimateResult {
+  const schedule = state.ctSchedule;
+  if (!schedule) return { state: null, local: null };
+  const isMfj = filingStatus === "marriedFilingJointly";
+  const isHoh = filingStatus === "headOfHousehold";
+  const isMfs = filingStatus === "marriedFilingSeparately";
+  const exemptionBase = isMfj
+    ? (state.exemptionMfj ?? 0)
+    : isHoh
+      ? (state.exemptionHoh ?? 0)
+      : isMfs
+        ? (state.exemptionMfs ?? 0)
+        : (state.exemptionSingle ?? 0);
+  const aThreshold = schedule.tableAThreshold[filingStatus];
+  const exemption =
+    agi <= aThreshold
+      ? exemptionBase
+      : Math.max(
+          0,
+          exemptionBase - 1000 * Math.ceil((agi - aThreshold) / 1000),
+        );
+  const taxable = Math.max(0, agi - exemption);
+  const brackets =
+    isHoh && state.bracketsHoh
+      ? state.bracketsHoh
+      : isMfj && state.bracketsMfj
+        ? state.bracketsMfj
+        : state.brackets;
+  if (!brackets) return { state: null, local: null };
+  const initial = applyBrackets(taxable, brackets);
+  const addBack = connecticutTableC(schedule.tableC[filingStatus], agi);
+  const recapture = connecticutTableD(schedule.tableD[filingStatus], agi);
+  const grossTax = initial + addBack + recapture;
+  const creditRate = connecticutTableE(schedule.tableE[filingStatus], agi);
+  const tax = Math.max(0, grossTax * (1 - creditRate));
+  return {
+    state: tax,
+    local: null,
+    effectiveStandardDeduction: 0,
+    effectiveExemption: exemption,
+  };
+}
+
+/**
+ * Maryland personal-exemption phaseout (2026 PV Worksheet, Line 6 chart):
+ * per-exemption amount by federal-AGI band; MFJ counts 2 exemptions,
+ * every other status 1. Single/MFS phase out at $100k/$125k/$150k;
+ * joint/HoH keep the full $3,200 until $150k, then $1,600/$800/$0.
+ */
+export function phasedOutExemption(
+  rule: ExemptionPhaseoutRule,
+  filingStatus: FilingStatus,
+  agi: number,
+): number {
+  const bands =
+    filingStatus === "marriedFilingJointly" ||
+    filingStatus === "headOfHousehold"
+      ? rule.joint
+      : rule.single;
+  const band = bands.find((b) => b.upTo === null || agi <= b.upTo);
+  const perExemption = band ? band.perExemption : 0;
+  const count = filingStatus === "marriedFilingJointly" ? 2 : 1;
+  return perExemption * count;
+}
+
+/**
+ * Arkansas tax with the 3.7% phase-in band (DFA Withholding Tax Formula
+ * Method, eff. 01/01/2026). `taxable` is net taxable income (after the
+ * $2,470 standard deduction). Below $94,701 the graduated brackets
+ * apply; inside the band the subtraction steps down $10 per $100 of
+ * income ($369.90 → $89.90); at $97,601+ it is 3.7% − $79.90.
+ * Note the state's own $2.70 seam: tax at $94,701 ($3,134.04) is $2.70
+ * BELOW tax at $94,700 ($3,136.74), because the band's first subtraction
+ * ($369.90) exceeds the $367.16 below the band.
+ */
+export function arkansasTaxWithPhaseIn(
+  taxable: number,
+  brackets: StateBracket[],
+  band: ArkansasPhaseInBand,
+): number {
+  if (taxable < band.bandStart) return applyBrackets(taxable, brackets);
+  if (taxable <= band.bandEnd) {
+    const step = Math.floor((taxable - band.bandStart) / band.stepSize);
+    const subtraction = band.firstSubtraction - step * band.stepDecrement;
+    return Math.max(0, (taxable * band.ratePct) / 100 - subtraction);
+  }
+  return Math.max(0, (taxable * band.ratePct) / 100 - band.aboveSubtraction);
+}
+
+/**
+ * South Carolina SCIAD phaseout (SCDOR Information Letter #26-20, Aug 31,
+ * 2026): full SCIAD at or below the threshold, then reduced by the
+ * fraction (AGI − threshold) / span, reaching $0 at threshold + span.
+ * The REDUCTION (not the SCIAD) is rounded DOWN to the next lowest $10.
+ */
+export function southCarolinaSciad(
+  status: FilingStatus,
+  agi: number,
+  rule: SciadPhaseoutRule,
+): number {
+  const leg =
+    status === "marriedFilingJointly"
+      ? rule.marriedFilingJointly
+      : status === "headOfHousehold"
+        ? rule.headOfHousehold
+        : status === "marriedFilingSeparately"
+          ? rule.marriedFilingSeparately
+          : rule.single;
+  if (agi <= leg.threshold) return leg.base;
+  if (agi >= leg.threshold + leg.span) return 0;
+  const reduction = leg.base * ((agi - leg.threshold) / leg.span);
+  const roundedReduction = Math.floor(reduction / 10) * 10;
+  return Math.max(0, leg.base - roundedReduction);
+}
+
 /**
  * Estimate annual state withholding for a given state.
  *
@@ -1782,21 +2647,40 @@ export function estimateStateInsurance(
  * federal treatment);
  * taxable = base − standard deduction (or exemption) − extra exemption,
  * then the flat rate or the graduated brackets for the filing status
- * (head of household / married filing separately fall back to the single
- * schedule — the research file only carries single + joint tables), then
- * subtract any nonrefundable credit (UT, DE, OR, NE, CA), floored at $0.
+ * (head of household uses bracketsHoh where the state has its own HoH
+ * schedule, else the single schedule where the state prescribes it —
+ * and returns { state: null, hohUnsupported: true } where the HoH
+ * schedule is unverified; married filing separately falls back to the
+ * single schedule), then subtract any nonrefundable credit (UT, DE, OR,
+ * NE, CA, IA), floored at $0. Connecticut runs its own Tax Calculation
+ * Schedule (Tables A–E) instead of this path.
  *
  * New York local layer: NYC residents add city tax on the same taxable
  * income (3.078%–3.876% brackets, minus the $63/$125 school tax credit);
  * Yonkers residents add a 16.75% surcharge on net state tax.
  *
- * Returns 0 for no-tax states and null only when a state has no usable
- * table at all (should not happen now that all 51 are verified).
+ * Per-state adjustments (round-4 friend audit, 15 Nov 2026 — see the
+ * rule fields on the state entries): AL standard-deduction phase-down +
+ * full federal-tax deduction; WI standard-deduction phaseout; AR 3.7%
+ * phase-in band; MD personal-exemption phaseout; MO tiered federal-tax
+ * deduction (§143.171); SC SCIAD phaseout. Round-5 (15 Nov 2026): OR
+ * capped+phased federal-tax deduction + credit AGI cutoff; UT taxpayer-
+ * credit phaseout (§59-10-1018); CT Tax Calculation Schedule (Tables
+ * A–E); head-of-household schedules for 29 states + an explicit
+ * hohUnsupported flag for the 13 unverified ones. The federal-tax
+ * deduction input is the engine's computed federal liability (an
+ * ESTIMATE, not observed withholding); the result exposes it as
+ * federalLiabilityEstimate so content can label it.
+ *
+ * Returns 0 for no-tax states and null when a state has no usable table
+ * at all (should not happen now that all 51 are verified) or when the
+ * filer is head of household in a hohUnsupported state.
  *
  * This is a planning estimate only: it ignores state credits beyond the
- * ones modeled, local taxes other than NYC/Yonkers, phaseouts, and
- * state-specific withholding tables, which is why the UI always labels
- * the state line as an estimate.
+ * ones modeled, local taxes other than NYC/Yonkers, and state-specific
+ * withholding tables (e.g. the AR $50-midrange lookup and whole-dollar
+ * rounding), which is why the UI always labels the state line as an
+ * estimate.
  */
 export function estimateStateWithholding(
   input: StateEstimateInput,
@@ -1806,6 +2690,13 @@ export function estimateStateWithholding(
   if (!state) return { state: null, local: null };
   if (state.structure === "none") return { state: 0, local: null };
 
+  // Head of household: never silently substitute the single-filer number
+  // for a state whose HoH schedule is unverified (hohSupported === false).
+  // The caller gets state: null + hohUnsupported so the UI can label it.
+  if (filingStatus === "headOfHousehold" && state.hohSupported === false) {
+    return { state: null, local: null, hohUnsupported: true };
+  }
+
   const rules = getStateDeductionRules(stateSlug);
   const excluded =
     (rules.k401Excluded ? preTax.k401Annual : 0) +
@@ -1814,12 +2705,113 @@ export function estimateStateWithholding(
   const stateTaxableBase = Math.max(0, annualGross - excluded);
 
   const isMfj = filingStatus === "marriedFilingJointly";
-  const deduction =
-    (isMfj ? state.standardDeductionMfj : state.standardDeductionSingle) ?? 0;
-  const exemption =
-    (isMfj ? state.exemptionMfj : state.exemptionSingle) ?? 0;
-  const credit = (isMfj ? state.creditMfj : state.creditSingle) ?? 0;
-  const taxable = Math.max(0, stateTaxableBase - deduction - exemption);
+  const isHoh = filingStatus === "headOfHousehold";
+  const isMfs = filingStatus === "marriedFilingSeparately";
+
+  // Connecticut runs its own Tax Calculation Schedule (Tables A–E) —
+  // no standard deduction, phased exemption, add-back, recapture, credit.
+  if (state.ctSchedule) {
+    return connecticutTax(state, filingStatus, stateTaxableBase);
+  }
+
+  // Standard deduction: status-specific base, then any phase-down/phaseout.
+  // (AL's chart is keyed to annual GROSS income; WI/SC use the AGI proxy
+  // stateTaxableBase.)
+  let deduction = isMfj
+    ? (state.standardDeductionMfj ?? 0)
+    : isHoh
+      ? (state.standardDeductionHoh ?? state.standardDeductionSingle ?? 0)
+      : isMfs
+        ? (state.standardDeductionMfs ?? state.standardDeductionSingle ?? 0)
+        : (state.standardDeductionSingle ?? 0);
+  if (state.sdPhaseDown) {
+    deduction = phaseDownStandardDeduction(
+      state.sdPhaseDown[filingStatus],
+      annualGross,
+    );
+  } else if (state.sdPhaseout) {
+    deduction = phaseoutStandardDeduction(
+      filingStatus,
+      stateTaxableBase,
+      state.sdPhaseout,
+    );
+  } else if (state.sciadPhaseout) {
+    deduction = southCarolinaSciad(
+      filingStatus,
+      stateTaxableBase,
+      state.sciadPhaseout,
+    );
+  }
+
+  // Personal exemption: the MD phaseout overrides the static amount.
+  let exemption =
+    (isMfj
+      ? state.exemptionMfj
+      : isHoh
+        ? (state.exemptionHoh ?? state.exemptionSingle)
+        : isMfs
+          ? (state.exemptionMfs ?? state.exemptionSingle)
+          : state.exemptionSingle) ?? 0;
+  if (state.exemptionPhaseout) {
+    exemption = phasedOutExemption(
+      state.exemptionPhaseout,
+      filingStatus,
+      stateTaxableBase,
+    );
+  }
+
+  // Nonrefundable credit: status-specific base amount. The UT phaseout
+  // and the OR AGI cutoff need `taxable` / the AGI proxy, so they are
+  // applied after `taxable` is computed below — not here.
+  const baseCredit =
+    (isMfj
+      ? state.creditMfj
+      : isHoh
+        ? (state.creditHoh ?? state.creditSingle)
+        : state.creditSingle) ?? 0;
+
+  // Federal income-tax deduction (AL full; MO §143.171 tiered; OR capped
+  // + phased). Input is the engine's computed federal liability — an
+  // ESTIMATE, not observed federal withholding. Direct callers that did
+  // not pass annualFederal get the same figure recomputed here.
+  let federalDeduction = 0;
+  let federalLiabilityEstimate: number | undefined;
+  if (state.federalTaxDeduction) {
+    federalLiabilityEstimate =
+      input.annualFederal ??
+      estimateFederalLiability(annualGross, filingStatus, preTax);
+    federalDeduction = federalTaxDeductionAmount(
+      state.federalTaxDeduction,
+      stateTaxableBase,
+      federalLiabilityEstimate,
+      filingStatus,
+    );
+  }
+
+  const taxable = Math.max(
+    0,
+    stateTaxableBase - deduction - exemption - federalDeduction,
+  );
+
+  // Credit adjustments that need the computed base: UT phases the credit
+  // out against Utah taxable income (§59-10-1018); OR zeroes the credit
+  // above the federal-AGI cutoff (ORS 316.085(5)).
+  let credit = baseCredit;
+  if (state.creditPhaseout) {
+    credit = utahTaxpayerCredit(
+      state.creditPhaseout,
+      filingStatus,
+      taxable,
+      baseCredit,
+    );
+  }
+  if (state.creditAgiLimit) {
+    const limit =
+      isMfj || isHoh
+        ? state.creditAgiLimit.joint
+        : state.creditAgiLimit.single;
+    if (stateTaxableBase > limit) credit = 0;
+  }
 
   let tax: number;
   if (state.structure === "flat") {
@@ -1827,9 +2819,15 @@ export function estimateStateWithholding(
     tax = (taxable * state.flatRatePct) / 100;
   } else {
     const brackets =
-      isMfj && state.bracketsMfj ? state.bracketsMfj : state.brackets;
+      isHoh && state.bracketsHoh
+        ? state.bracketsHoh
+        : isMfj && state.bracketsMfj
+          ? state.bracketsMfj
+          : state.brackets;
     if (!brackets) return { state: null, local: null };
-    tax = applyBrackets(taxable, brackets);
+    tax = state.arPhaseInBand
+      ? arkansasTaxWithPhaseIn(taxable, brackets, state.arPhaseInBand)
+      : applyBrackets(taxable, brackets);
   }
   const stateTax = Math.max(0, tax - credit);
 
@@ -1857,7 +2855,18 @@ export function estimateStateWithholding(
     }
   }
 
-  return { state: stateTax, local };
+  return {
+    state: stateTax,
+    local,
+    effectiveStandardDeduction: deduction,
+    effectiveExemption: exemption,
+    ...(state.federalTaxDeduction
+      ? {
+          federalTaxDeduction: federalDeduction,
+          federalLiabilityEstimate,
+        }
+      : {}),
+  };
 }
 
 /**

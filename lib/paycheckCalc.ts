@@ -122,13 +122,20 @@ interface Bracket {
   /** Top of this bracket (taxable income). null = no ceiling. */
   upTo: number | null;
   ratePct: number;
+  /**
+   * Lump sum added once when this bracket is entered, on top of the
+   * marginal rate (e.g. Ohio's $332 step in ORC 5747.02(A)(3)(c)).
+   * Absent on every other bracket.
+   */
+  base?: number;
 }
 
 /**
  * 2026 federal ordinary-income brackets (taxable income, Rev. Proc. 2025-32
- * §4.01 Tables 1–4). Head of household mirrors single above the 22%
- * bracket; married filing separately mirrors single except the 37% threshold
- * ($384,350).
+ * §4.01 Tables 1–4). Head of household matches single at the 10%/12%/22%
+ * bands and at the 35%/37% thresholds, but its 24% band ends at $201,750
+ * and its 32% band at $256,200 (single: $201,775 / $256,225). Married
+ * filing separately mirrors single except the 37% threshold ($384,350).
  */
 export const FEDERAL_BRACKETS_2026: Record<FilingStatus, Bracket[]> = {
   single: [
@@ -153,8 +160,8 @@ export const FEDERAL_BRACKETS_2026: Record<FilingStatus, Bracket[]> = {
     { upTo: 17700, ratePct: 10 },
     { upTo: 67450, ratePct: 12 },
     { upTo: 105700, ratePct: 22 },
-    { upTo: 201775, ratePct: 24 },
-    { upTo: 256225, ratePct: 32 },
+    { upTo: 201750, ratePct: 24 },
+    { upTo: 256200, ratePct: 32 },
     { upTo: 640600, ratePct: 35 },
     { upTo: null, ratePct: 37 },
   ],
@@ -189,7 +196,10 @@ export function applyBrackets(taxableIncome: number, brackets: Bracket[]): numbe
   for (const b of brackets) {
     const top = b.upTo ?? Infinity;
     const inBracket = Math.min(taxableIncome, top) - prevTop;
-    if (inBracket > 0) tax += (inBracket * b.ratePct) / 100;
+    if (inBracket > 0) {
+      tax += (inBracket * b.ratePct) / 100;
+      if (b.base) tax += b.base;
+    }
     if (taxableIncome <= top) break;
     prevTop = top;
   }
@@ -203,6 +213,35 @@ export function marginalRatePct(taxableIncome: number, brackets: Bracket[]): num
     if (b.upTo === null || taxableIncome <= b.upTo) return b.ratePct;
   }
   return 37;
+}
+
+/**
+ * Annual federal income-tax liability: gross minus ALL pre-tax
+ * deductions, minus the federal standard deduction, through the 2026
+ * brackets. Single source of truth for the federal figure —
+ * calculatePaycheck uses it, and the state estimators that deduct
+ * federal tax (AL, MO) use it when the caller did not pass annualFederal.
+ * This is the engine's own computed liability (an ESTIMATE), not observed
+ * federal withholding.
+ */
+export function estimateFederalLiability(
+  annualGross: number,
+  filingStatus: FilingStatus,
+  preTax: PreTaxDeductions,
+): number {
+  const incomeTaxBase = Math.max(
+    0,
+    annualGross -
+      (preTax.k401Annual + preTax.sec125Annual + preTax.hsaAnnual),
+  );
+  const federalTaxableIncome = Math.max(
+    0,
+    incomeTaxBase - STANDARD_DEDUCTION_2026[filingStatus],
+  );
+  return applyBrackets(
+    federalTaxableIncome,
+    FEDERAL_BRACKETS_2026[filingStatus],
+  );
 }
 
 /** Pre-tax deductions, split by how the tax code treats them. */
@@ -320,6 +359,15 @@ export interface StateEstimateInput {
   filingStatus: FilingStatus;
   preTax: PreTaxDeductions;
   nyLocal: NyLocalOption;
+  /**
+   * Engine-computed annual federal income-tax liability, when the caller
+   * already has it (calculatePaycheck passes its own figure). States that
+   * let you deduct federal tax (AL, MO, OR) use it as the deduction input.
+   * It is an ESTIMATE — the engine's own computed liability, not observed
+   * federal withholding — and content must label it that way. When absent,
+   * the state estimator recomputes it with estimateFederalLiability.
+   */
+  annualFederal?: number;
 }
 
 export interface StateEstimateResult {
@@ -327,6 +375,25 @@ export interface StateEstimateResult {
   state: number | null;
   /** Annual local tax (NYC / Yonkers), if any. */
   local: { label: string; annual: number } | null;
+  /** Standard deduction actually subtracted, after any AL/WI/SC phase-down/phaseout. */
+  effectiveStandardDeduction?: number;
+  /** Personal exemption actually subtracted, after any MD-style phaseout. */
+  effectiveExemption?: number;
+  /**
+   * Federal income-tax deduction subtracted (AL/MO) — computed from the
+   * engine's federal-liability estimate, not observed withholding.
+   */
+  federalTaxDeduction?: number;
+  /** The engine-computed federal liability the federal-tax deduction was based on (estimate). */
+  federalLiabilityEstimate?: number;
+  /**
+   * True when the filer is head of household and this state's HoH schedule
+   * is not modeled (state.hohSupported === false). The engine returns
+   * state: null rather than silently substituting the single-filer number;
+   * the UI should show a clear "head of household not modeled for this
+   * state" label instead of a figure.
+   */
+  hohUnsupported?: boolean;
 }
 
 export type StateEstimator = (input: StateEstimateInput) => StateEstimateResult;
@@ -352,6 +419,13 @@ export interface PaycheckBreakdown {
   annualMedicare: number;
   annualMedicareAdditional: number;
   annualState: number | null; // null = state estimate unavailable (tables pending)
+  /**
+   * True when the filer is head of household and this state's HoH schedule
+   * is not modeled — the state estimate is null for that reason, not
+   * because the state itself is unbuilt. Threaded through so the UI can
+   * label it instead of showing the generic "coming soon" note.
+   */
+  hohUnsupported?: boolean;
   annualLocal: number | null;
   localLabel: string | null;
   annualStateInsurance: number;
@@ -427,9 +501,10 @@ export function calculatePaycheck(
     0,
     incomeTaxBase - STANDARD_DEDUCTION_2026[inputs.filingStatus],
   );
-  const annualFederal = applyBrackets(
-    federalTaxableIncome,
-    FEDERAL_BRACKETS_2026[inputs.filingStatus],
+  const annualFederal = estimateFederalLiability(
+    annualGross,
+    inputs.filingStatus,
+    inputs.preTax,
   );
 
   const annualSocialSecurity =
@@ -448,6 +523,7 @@ export function calculatePaycheck(
         filingStatus: inputs.filingStatus,
         preTax: inputs.preTax,
         nyLocal: inputs.nyLocal,
+        annualFederal,
       })
     : { state: null, local: null };
   const annualState = stateEstimate.state;
@@ -497,6 +573,7 @@ export function calculatePaycheck(
     annualMedicare,
     annualMedicareAdditional,
     annualState,
+    hohUnsupported: stateEstimate.hohUnsupported ?? false,
     annualLocal,
     localLabel,
     annualStateInsurance,
