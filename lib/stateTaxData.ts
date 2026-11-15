@@ -25,8 +25,25 @@
  *   nonrefundable CREDIT of 6% of the federal standard deduction instead
  *   ($966 single / $1,932 joint). The estimator subtracts the credit after
  *   applying the 4.5% rate — do not add a UT deduction.
- * - Local (city/county) income taxes are NOT modeled anywhere. Each state
- *   page notes the big ones in `localTaxNote`; the calculator disclaims them.
+ * - Local (city/county) income taxes are NOT modeled anywhere, except New
+ *   York City + Yonkers (see the NY local layer below). Each state page
+ *   notes the big ones in `localTaxNote`; the calculator disclaims them.
+ * - Per-state deduction rules (STATE_DEDUCTION_RULES): most states follow
+ *   the federal treatment — 401(k), Section 125 and HSA excluded from
+ *   state taxable wages — but a few states tax one or more of them. The
+ *   table lists ONLY exceptions verified against a state DOR source
+ *   (research 15 Nov 2026); every other state defaults to the federal
+ *   treatment. Never add an exception without a source.
+ * - State payroll-insurance programs (STATE_INSURANCE_PROGRAMS) — CA SDI,
+ *   NY PFL/DBL, NJ TDI/FLI/UI, WA PFML + WA Cares, MA/CT/OR/CO/MN paid
+ *   leave, RI/HI TDI — are modeled separately from income tax, each with
+ *   its verified 2026 rate, cap and official source. Programs whose 2026
+ *   rate could not be verified are NOT listed.
+ * - New York local tax: NYC resident brackets 3.078%–3.876% (NY Tax Dept,
+ *   Form IT-2105-I (2026), p. 10) on NY State taxable income, minus the
+ *   $63/$125 NYC school tax credit (income ≤ $250,000); the NYC
+ *   rate-reduction credit is NOT modeled. Yonkers residents pay a 16.75%
+ *   surcharge on net NY State tax (IT-2105-I (2026), p. 8).
  * - Direct per-state Department of Revenue verification is still pending for
  *   the top-traffic states (TX, CA, FL, NY, PA, IL, OH, GA, NJ, NC) — the
  *   figures rest on the Tax Foundation 2026 tables + cross-check until then.
@@ -35,7 +52,13 @@
  */
 
 import { applyBrackets } from "./paycheckCalc";
-import type { FilingStatus } from "./paycheckCalc";
+import type {
+  FilingStatus,
+  NyLocalOption,
+  StateEstimateInput,
+  StateEstimateResult,
+  StateInsuranceLine,
+} from "./paycheckCalc";
 
 export type StateTaxStructure = "none" | "flat" | "graduated";
 
@@ -199,7 +222,8 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
       "California taxes taxable income in 10 brackets — only the dollars inside each bracket are taxed at that bracket's rate. The calculator subtracts the $5,540 single standard deduction first.",
       "The 13.3% top rate includes the 1% Mental Health Services Tax on taxable income over $1 million.",
       "Bracket widths shown are the 2025 inflation-adjusted amounts — the 2026 FTB adjustment was not yet published when the Tax Foundation compiled its 2026 table.",
-      "California's 1.3% SDI payroll tax has no wage ceiling and is separate from income tax.",
+      "California's 1.3% SDI payroll tax has no wage ceiling and is separate from income tax — the calculator shows it as its own deduction line below.",
+      "California taxes HSA contributions — they do not reduce CA taxable income, unlike 401(k) and Section 125 items.",
     ],
     localTaxNote: null,
   },
@@ -819,6 +843,7 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     withholdingNotes: [
       "New Jersey taxes taxable income in 7 brackets — only the dollars inside each bracket are taxed at that bracket's rate. The calculator subtracts the $1,000 personal exemption (single filer) first.",
       "New Jersey is the only state where joint brackets differ structurally from single brackets in the middle bands.",
+      "New Jersey taxes Section 125 health premiums, FSAs and HSAs — they do not reduce NJ taxable income. 401(k) contributions do follow the federal treatment and are excluded.",
     ],
     localTaxNote: null,
   },
@@ -867,8 +892,9 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     withholdingNotes: [
       "New York taxes taxable income in 9 brackets — only the dollars inside each bracket are taxed at that bracket's rate. The calculator subtracts the $8,000 single standard deduction first.",
       "Benefit recapture: high earners pay the top rate on all income.",
+      "New York City residents add city tax (3.078%–3.876%) on the same taxable income, minus the $63/$125 school tax credit — pick \"New York City\" in the calculator. Yonkers residents add a 16.75% surcharge on their state tax instead. The NYC rate-reduction credit is not modeled.",
     ],
-    localTaxNote: "New York City levies its own income tax on residents (up to 3.876%), and Yonkers has one too — on top of the state rate.",
+    localTaxNote: "New York City levies its own income tax on residents (3.078%–3.876%), and Yonkers adds a 16.75% surcharge on state tax — pick your local layer in the calculator above. Commuters who live outside the city pay neither.",
   },
   {
     slug: "north-carolina-paycheck-calculator",
@@ -1010,6 +1036,7 @@ export const STATE_TAX_DATA: StateTaxInfo[] = [
     summary: "Pennsylvania taxes income at a single flat rate of 3.07% in 2026.",
     withholdingNotes: [
       "Pennsylvania's 3.07% flat rate applies to taxable income. Pennsylvania has no standard deduction or personal exemption for state purposes.",
+      "Pennsylvania taxes 401(k) contributions — unlike most states, they do not reduce PA taxable income. Dependent-care FSA contributions are taxed too; health-related Section 125 items are excluded.",
     ],
     localTaxNote: "Most Pennsylvania municipalities and school districts add a local earned income tax (commonly 1%) on top of the state rate.",
   },
@@ -1329,31 +1356,462 @@ export function topRatePct(state: StateTaxInfo): number {
 
 // ---- Pluggable state withholding estimate ----
 
+// ---- Per-state deduction rules ----
+
+/**
+ * Which pre-tax deductions a state excludes from its own taxable wages.
+ * Defaults (most states) follow the federal treatment: everything excluded.
+ * Exceptions exist ONLY where a state DOR source says so — see the table
+ * below. Filled from verified DOR research, 15 Nov 2026.
+ */
+export interface StateDeductionRules {
+  /** 401(k) elective deferrals excluded from state taxable wages? */
+  k401Excluded: boolean;
+  /** Section 125 / 132 items (medical, dental, vision, FSA, commuter,
+   *  LTD, life) excluded from state taxable wages? */
+  sec125Excluded: boolean;
+  /** HSA contributions excluded from state taxable wages? */
+  hsaExcluded: boolean;
+}
+
+const FEDERAL_DEDUCTION_RULES: StateDeductionRules = {
+  k401Excluded: true,
+  sec125Excluded: true,
+  hsaExcluded: true,
+};
+
+/**
+ * States whose deduction treatment differs from the federal norm.
+ * Verified 15 Nov 2026 against state DOR sources. Only three deviant
+ * states exist for these deduction types — every other state with an
+ * income tax follows the federal norm.
+ *
+ * - California: HSA contributions are TAXED for PIT (EDD DE 231EB, HSA
+ *   rows "Subject"; FTB Schedule CA add-back). 401(k) and Section 125
+ *   are excluded from PIT (but 401(k) is INCLUDED in SDI wages).
+ * - Pennsylvania: 401(k)/403(b)/457(b) employee contributions are TAXED
+ *   (PA DOR, PIT Guide — Gross Compensation, "Income Items Always
+ *   Taxable"). Section 125 health premiums are excluded; HSA through a
+ *   payroll §125 plan is excluded (61 Pa. Code §101.6(c)(6), PIT-06-005).
+ *   Dependent-care FSA is taxed — the panel's FSA row is the HEALTH FSA.
+ * - New Jersey: Section 125 health premiums, FSAs and HSAs are TAXED
+ *   (NJ Division of Taxation, Technical Bulletin TB-39(R), 2003 — NJ
+ *   does not adopt IRC §125). 401(k) is EXCLUDED, following the federal
+ *   treatment (N.J.S.A. 54A:6-21) — NJ taxes 403(b)/457/SEP/TSP/IRA
+ *   contributions instead, which this calculator does not model.
+ */
+export const STATE_DEDUCTION_RULES: Record<string, StateDeductionRules> = {
+  "california-paycheck-calculator": {
+    k401Excluded: true,
+    sec125Excluded: true,
+    hsaExcluded: false,
+  },
+  "pennsylvania-paycheck-calculator": {
+    k401Excluded: false,
+    sec125Excluded: true,
+    hsaExcluded: true,
+  },
+  "new-jersey-paycheck-calculator": {
+    k401Excluded: true,
+    sec125Excluded: false,
+    hsaExcluded: false,
+  },
+};
+
+export function getStateDeductionRules(
+  stateSlug: string,
+): StateDeductionRules {
+  return STATE_DEDUCTION_RULES[stateSlug] ?? FEDERAL_DEDUCTION_RULES;
+}
+
+// ---- New York local tax (NYC + Yonkers) ----
+
+/**
+ * 2026 NYC resident income-tax brackets (NY Tax Dept, Form IT-2105-I
+ * (2026), p. 10 — https://www.tax.ny.gov/pdf/current_forms/it/it2105i.pdf).
+ * NYC taxable income = NY State taxable income; there is no separate NYC
+ * standard deduction. Single and MFS share a schedule; MFJ shares with
+ * qualifying surviving spouse.
+ */
+export const NYC_BRACKETS_2026: Record<FilingStatus, StateBracket[]> = {
+  single: [
+    { upTo: 12000, ratePct: 3.078 },
+    { upTo: 25000, ratePct: 3.762 },
+    { upTo: 50000, ratePct: 3.819 },
+    { upTo: null, ratePct: 3.876 },
+  ],
+  marriedFilingSeparately: [
+    { upTo: 12000, ratePct: 3.078 },
+    { upTo: 25000, ratePct: 3.762 },
+    { upTo: 50000, ratePct: 3.819 },
+    { upTo: null, ratePct: 3.876 },
+  ],
+  marriedFilingJointly: [
+    { upTo: 21600, ratePct: 3.078 },
+    { upTo: 45000, ratePct: 3.762 },
+    { upTo: 90000, ratePct: 3.819 },
+    { upTo: null, ratePct: 3.876 },
+  ],
+  headOfHousehold: [
+    { upTo: 14400, ratePct: 3.078 },
+    { upTo: 30000, ratePct: 3.762 },
+    { upTo: 60000, ratePct: 3.819 },
+    { upTo: null, ratePct: 3.876 },
+  ],
+};
+
+/**
+ * NYC school tax credit (fixed amount, refundable): $125 MFJ, $63 all
+ * other filers, when income is $250,000 or less (IT-2105-I (2026) p. 8).
+ * The separate NYC rate-reduction credit is NOT modeled.
+ */
+export const NYC_SCHOOL_TAX_CREDIT: Record<FilingStatus, number> = {
+  single: 63,
+  marriedFilingJointly: 125,
+  headOfHousehold: 63,
+  marriedFilingSeparately: 63,
+};
+export const NYC_SCHOOL_TAX_CREDIT_INCOME_LIMIT = 250000;
+
+/** Yonkers resident income-tax surcharge: 16.75% of net NY State tax
+ *  (IT-2105-I (2026), p. 8, Line 22a). Residents only. */
+export const YONKERS_SURCHARGE_RATE = 0.1675;
+
+// ---- State payroll-insurance programs (separate from income tax) ----
+
+export interface StateInsuranceProgram {
+  id: string;
+  label: string;
+  /** Employee rate (%). */
+  ratePct: number;
+  /** Annual wage cap (null = none). */
+  wageCap: number | null;
+  /** Annual contribution cap (null = none) — e.g. NY PFL $411.91. */
+  contributionCap: number | null;
+  /** Weekly deduction cap (null = none) — e.g. HI TDI $7.50/week. */
+  weeklyCap: number | null;
+  /**
+   * "gross" = all wages; "fica" = wages after Section 125 + HSA
+   * deductions (the FICA-wage basis — CT, OR, MN); "grossMinusSec125" =
+   * wages after Section 125 only (CA SDI: 401(k) deferrals and HSA
+   * contributions stay IN SDI wages — EDD DE 231EB).
+   */
+  base: "gross" | "fica" | "grossMinusSec125";
+  /** Official source URL. Empty string only when no direct official URL
+   *  was captured (the rate is then statutory + corroborated). */
+  sourceUrl: string;
+  sourceNote: string;
+  /** e.g. "Maximum employee share — your employer may cover part of it." */
+  note?: string;
+}
+
+/**
+ * Mandatory employee-paid payroll-insurance programs, 2026.
+ * Every rate/cap below was verified 15 Nov 2026 against an official
+ * state source. Programs whose 2026 rate could not be verified are NOT
+ * listed. Oregon's 0.1% Statewide Transit Tax is intentionally not here
+ * (a transit tax, not an insurance program).
+ */
+export const STATE_INSURANCE_PROGRAMS: Record<
+  string,
+  StateInsuranceProgram[]
+> = {
+  "california-paycheck-calculator": [
+    {
+      id: "ca-sdi",
+      label: "California SDI",
+      ratePct: 1.3,
+      wageCap: null,
+      contributionCap: null,
+      weeklyCap: null,
+      base: "grossMinusSec125",
+      sourceUrl: "https://www.edd.ca.gov/Payroll_Taxes/Rates_and_Withholding.htm",
+      sourceNote:
+        "Verified 15 Nov 2026: EDD 2026 SDI rate 1.3%, no wage ceiling (SB 951, since 1 Jan 2024). Covers disability + Paid Family Leave. SDI wages exclude Section 125 items but include 401(k) deferrals and HSA contributions.",
+    },
+  ],
+  "new-york-paycheck-calculator": [
+    {
+      id: "ny-pfl",
+      label: "NY Paid Family Leave",
+      ratePct: 0.432,
+      wageCap: null,
+      contributionCap: 411.91,
+      weeklyCap: null,
+      base: "gross",
+      sourceUrl: "https://paidfamilyleave.ny.gov/2026",
+      sourceNote:
+        "Verified 15 Nov 2026: NY PFL 0.432% of gross wages, max $411.91/yr (2026).",
+    },
+    {
+      id: "ny-dbl",
+      label: "NY Disability Benefits",
+      ratePct: 0.5,
+      wageCap: null,
+      contributionCap: null,
+      weeklyCap: 0.6,
+      base: "gross",
+      sourceUrl: "",
+      sourceNote:
+        "Verified 15 Nov 2026: NY DBL 0.5% of wages, max $0.60/week (Workers' Compensation Law §209) — statutory rate, corroborated by multiple sources citing the NY Workers' Compensation Board.",
+      note: "Your employer may pay this — on many pay stubs it is $0.",
+    },
+  ],
+  "new-jersey-paycheck-calculator": [
+    {
+      id: "nj-tdi",
+      label: "NJ Temporary Disability Insurance",
+      ratePct: 0.19,
+      wageCap: 171100,
+      contributionCap: null,
+      weeklyCap: null,
+      base: "gross",
+      sourceUrl: "https://www.nj.gov/labor/ea/employer-services/rate-info/",
+      sourceNote:
+        "Verified 15 Nov 2026: NJDOL 2026 TDI employee rate 0.19% on a $171,100 wage base (max $325.09/yr).",
+    },
+    {
+      id: "nj-fli",
+      label: "NJ Family Leave Insurance",
+      ratePct: 0.23,
+      wageCap: 171100,
+      contributionCap: null,
+      weeklyCap: null,
+      base: "gross",
+      sourceUrl: "https://www.nj.gov/labor/ea/employer-services/rate-info/",
+      sourceNote:
+        "Verified 15 Nov 2026: NJDOL 2026 FLI employee rate 0.23% on a $171,100 wage base (max $393.53/yr).",
+    },
+    {
+      id: "nj-ui-wf",
+      label: "NJ Unemployment + Workforce (UI/WF)",
+      ratePct: 0.425,
+      wageCap: 44800,
+      contributionCap: null,
+      weeklyCap: null,
+      base: "gross",
+      sourceUrl: "https://www.nj.gov/labor/ea/employer-services/rate-info/",
+      sourceNote:
+        "Verified 15 Nov 2026: NJDOL 2026 UI 0.3825% + WF/SWF 0.0425% = 0.425% on the first $44,800 (max $190.40/yr).",
+    },
+  ],
+  "washington-paycheck-calculator": [
+    {
+      id: "wa-pfml",
+      label: "WA Paid Family & Medical Leave",
+      ratePct: 0.8072,
+      wageCap: 184500,
+      contributionCap: null,
+      weeklyCap: null,
+      base: "gross",
+      sourceUrl: "https://paidleave.wa.gov/employer-roles-responsibilities/",
+      sourceNote:
+        "Verified 15 Nov 2026: WA PFML 2026 total premium 1.13% x 71.43% employee share = 0.8072%, up to the $184,500 Social Security cap (ESD).",
+      note: "Maximum employee share — your employer may cover part of it.",
+    },
+    {
+      id: "wa-cares",
+      label: "WA Cares (long-term care)",
+      ratePct: 0.58,
+      wageCap: null,
+      contributionCap: null,
+      weeklyCap: null,
+      base: "gross",
+      sourceUrl: "https://paidleave.wa.gov/employer-roles-responsibilities/",
+      sourceNote:
+        "Verified 15 Nov 2026: WA Cares 0.58% of gross wages, no wage cap (ESD). 100% employee-paid.",
+    },
+  ],
+  "massachusetts-paycheck-calculator": [
+    {
+      id: "ma-pfml",
+      label: "MA Paid Family & Medical Leave",
+      ratePct: 0.46,
+      wageCap: 184500,
+      contributionCap: null,
+      weeklyCap: null,
+      base: "gross",
+      sourceUrl:
+        "https://www.mass.gov/info-details/paid-family-and-medical-leave-employer-contribution-rates-and-calculator",
+      sourceNote:
+        "Verified 15 Nov 2026: MA PFML 2026 max employee share 0.46% (0.28% medical + 0.18% family) up to the $184,500 cap (DFML).",
+      note: "Maximum employee share — your employer may cover part of it.",
+    },
+  ],
+  "connecticut-paycheck-calculator": [
+    {
+      id: "ct-paid-leave",
+      label: "CT Paid Leave",
+      ratePct: 0.5,
+      wageCap: 184500,
+      contributionCap: null,
+      weeklyCap: null,
+      base: "fica",
+      sourceUrl: "https://www.ctpaidleave.org/remit-contributions",
+      sourceNote:
+        "Verified 15 Nov 2026: CT Paid Leave 0.5% of wages up to the $184,500 Social Security cap; base is FICA wages (Section 125 excluded).",
+    },
+  ],
+  "oregon-paycheck-calculator": [
+    {
+      id: "or-paid-leave",
+      label: "Paid Leave Oregon",
+      ratePct: 0.6,
+      wageCap: 184500,
+      contributionCap: null,
+      weeklyCap: null,
+      base: "fica",
+      sourceUrl: "https://paidleave.oregon.gov/employees/overview.html",
+      sourceNote:
+        "Verified 15 Nov 2026: Paid Leave Oregon 2026 total 1% x 60% employee share = 0.6%, up to $184,500; subject wages exclude Section 125 / FSA / HSA.",
+      note: "Maximum employee share — your employer may cover part of it.",
+    },
+  ],
+  "colorado-paycheck-calculator": [
+    {
+      id: "co-famli",
+      label: "CO FAMLI",
+      ratePct: 0.44,
+      wageCap: 184500,
+      contributionCap: null,
+      weeklyCap: null,
+      base: "gross",
+      sourceUrl:
+        "https://famli.colorado.gov/individuals-and-families/how-famli-works/premium-and-benefits-calculator",
+      sourceNote:
+        "Verified 15 Nov 2026: CO FAMLI 2026 total 0.88%, 50/50 split — employee 0.44% up to the $184,500 cap (SB 25-144).",
+      note: "Maximum employee share — your employer may cover part of it.",
+    },
+  ],
+  "rhode-island-paycheck-calculator": [
+    {
+      id: "ri-tdi",
+      label: "RI Temporary Disability Insurance",
+      ratePct: 1.1,
+      wageCap: 100000,
+      contributionCap: null,
+      weeklyCap: null,
+      base: "gross",
+      sourceUrl:
+        "https://dlt.ri.gov/press-releases/2026-tax-rates-unemployment-insurance-and-temporary-disability-insurance",
+      sourceNote:
+        "Verified 15 Nov 2026: RI DLT 2026 TDI rate 1.1% (down from 1.3% in 2025) on a $100,000 wage base (max $1,100/yr). Includes Temporary Caregiver Insurance — no separate line.",
+    },
+  ],
+  "hawaii-paycheck-calculator": [
+    {
+      id: "hi-tdi",
+      label: "HI Temporary Disability Insurance",
+      ratePct: 0.5,
+      wageCap: null,
+      contributionCap: null,
+      weeklyCap: 7.5,
+      base: "gross",
+      sourceUrl:
+        "https://labor.hawaii.gov/dcd/files/2025/12/2026-Maximum-Weekly-Wage-Base.pdf",
+      sourceNote:
+        "Verified 15 Nov 2026: HI DLIR 2026 TDI up to 0.5% of weekly wages, max $7.50/week (weekly wage base $1,500.21).",
+      note: "Your employer may pay the whole premium — often $0 on pay stubs.",
+    },
+  ],
+  "minnesota-paycheck-calculator": [
+    {
+      id: "mn-paid-leave",
+      label: "MN Paid Leave",
+      ratePct: 0.44,
+      wageCap: 185000,
+      contributionCap: null,
+      weeklyCap: null,
+      base: "fica",
+      sourceUrl: "https://pl.mn.gov/individuals/how-paid-leave-works",
+      sourceNote:
+        "Verified 15 Nov 2026: MN Paid Leave 2026 total 0.88%, employee max 0.44%, cap $185,000 (the Social Security limit rounded to the nearest thousand — NOT $184,500). Base is FICA wages.",
+      note: "Maximum employee share — your employer may cover part of it.",
+    },
+  ],
+};
+
+/**
+ * Estimate the annual state payroll-insurance deductions for a state.
+ * Returns one line per program (only lines with an amount above $0).
+ */
+export function estimateStateInsurance(
+  stateSlug: string,
+  annualGross: number,
+  sec125Annual: number,
+  hsaAnnual: number,
+): StateInsuranceLine[] {
+  const programs = STATE_INSURANCE_PROGRAMS[stateSlug] ?? [];
+  const ficaBase = Math.max(0, annualGross - sec125Annual - hsaAnnual);
+  const sec125Base = Math.max(0, annualGross - sec125Annual);
+  const lines: StateInsuranceLine[] = [];
+  for (const p of programs) {
+    const base =
+      p.base === "fica" ? ficaBase : p.base === "grossMinusSec125" ? sec125Base : annualGross;
+    let annual: number;
+    if (p.weeklyCap !== null) {
+      annual = Math.min((base / 52) * (p.ratePct / 100), p.weeklyCap) * 52;
+    } else if (p.contributionCap !== null) {
+      annual = Math.min((base * p.ratePct) / 100, p.contributionCap);
+    } else if (p.wageCap !== null) {
+      annual = (Math.min(base, p.wageCap) * p.ratePct) / 100;
+    } else {
+      annual = (base * p.ratePct) / 100;
+    }
+    if (annual > 0) {
+      lines.push({
+        id: p.id,
+        label: p.label,
+        annual,
+        ...(p.sourceUrl ? { sourceUrl: p.sourceUrl } : {}),
+        note: p.note,
+      });
+    }
+  }
+  return lines;
+}
+
+// ---- Pluggable state withholding estimate ----
+
 /**
  * Estimate annual state withholding for a given state.
  *
  * Method (annual-liability approximation, disclosed as an estimate):
- * taxable = gross − standard deduction (or exemption) − extra exemption,
+ * taxable base = gross − the pre-tax deductions THIS state excludes
+ * (per-state rules — see STATE_DEDUCTION_RULES; most states follow the
+ * federal treatment);
+ * taxable = base − standard deduction (or exemption) − extra exemption,
  * then the flat rate or the graduated brackets for the filing status
  * (head of household / married filing separately fall back to the single
  * schedule — the research file only carries single + joint tables), then
  * subtract any nonrefundable credit (UT, DE, OR, NE, CA), floored at $0.
  *
+ * New York local layer: NYC residents add city tax on the same taxable
+ * income (3.078%–3.876% brackets, minus the $63/$125 school tax credit);
+ * Yonkers residents add a 16.75% surcharge on net state tax.
+ *
  * Returns 0 for no-tax states and null only when a state has no usable
  * table at all (should not happen now that all 51 are verified).
  *
  * This is a planning estimate only: it ignores state credits beyond the
- * ones modeled, local taxes, phaseouts, and state-specific withholding
- * tables, which is why the UI always labels the state line as an estimate.
+ * ones modeled, local taxes other than NYC/Yonkers, phaseouts, and
+ * state-specific withholding tables, which is why the UI always labels
+ * the state line as an estimate.
  */
 export function estimateStateWithholding(
-  stateSlug: string,
-  annualGross: number,
-  filingStatus: FilingStatus,
-): number | null {
+  input: StateEstimateInput,
+): StateEstimateResult {
+  const { stateSlug, annualGross, filingStatus, preTax, nyLocal } = input;
   const state = getStateBySlug(stateSlug);
-  if (!state) return null;
-  if (state.structure === "none") return 0;
+  if (!state) return { state: null, local: null };
+  if (state.structure === "none") return { state: 0, local: null };
+
+  const rules = getStateDeductionRules(stateSlug);
+  const excluded =
+    (rules.k401Excluded ? preTax.k401Annual : 0) +
+    (rules.sec125Excluded ? preTax.sec125Annual : 0) +
+    (rules.hsaExcluded ? preTax.hsaAnnual : 0);
+  const stateTaxableBase = Math.max(0, annualGross - excluded);
 
   const isMfj = filingStatus === "marriedFilingJointly";
   const deduction =
@@ -1361,19 +1819,45 @@ export function estimateStateWithholding(
   const exemption =
     (isMfj ? state.exemptionMfj : state.exemptionSingle) ?? 0;
   const credit = (isMfj ? state.creditMfj : state.creditSingle) ?? 0;
-  const taxable = Math.max(0, annualGross - deduction - exemption);
+  const taxable = Math.max(0, stateTaxableBase - deduction - exemption);
 
   let tax: number;
   if (state.structure === "flat") {
-    if (state.flatRatePct === null) return null;
+    if (state.flatRatePct === null) return { state: null, local: null };
     tax = (taxable * state.flatRatePct) / 100;
   } else {
     const brackets =
       isMfj && state.bracketsMfj ? state.bracketsMfj : state.brackets;
-    if (!brackets) return null;
+    if (!brackets) return { state: null, local: null };
     tax = applyBrackets(taxable, brackets);
   }
-  return Math.max(0, tax - credit);
+  const stateTax = Math.max(0, tax - credit);
+
+  // New York local layer (NYC / Yonkers — mutually exclusive, residents only).
+  let local: StateEstimateResult["local"] = null;
+  if (stateSlug === "new-york-paycheck-calculator") {
+    if (nyLocal === "nyc") {
+      const nycTax = Math.max(
+        0,
+        applyBrackets(taxable, NYC_BRACKETS_2026[filingStatus]),
+      );
+      const schoolCredit =
+        annualGross <= NYC_SCHOOL_TAX_CREDIT_INCOME_LIMIT
+          ? NYC_SCHOOL_TAX_CREDIT[filingStatus]
+          : 0;
+      local = {
+        label: "New York City tax",
+        annual: Math.max(0, nycTax - schoolCredit),
+      };
+    } else if (nyLocal === "yonkers") {
+      local = {
+        label: "Yonkers resident surcharge",
+        annual: stateTax * YONKERS_SURCHARGE_RATE,
+      };
+    }
+  }
+
+  return { state: stateTax, local };
 }
 
 /**

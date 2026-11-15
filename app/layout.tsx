@@ -68,10 +68,10 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
                 About
               </Link>
               <Link
-                href="/contact"
-                className="hidden rounded-lg px-3 py-2 text-slate-700 hover:bg-slate-100 hover:text-slate-900 sm:block"
+                href="/#calculator"
+                className="ml-1 rounded-full bg-blue-600 px-4 py-2 text-sm font-bold text-white shadow-sm transition hover:bg-blue-700"
               >
-                Contact
+                Calculate
               </Link>
             </nav>
           </div>
@@ -79,68 +79,87 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
 
         <main className="flex-1">{children}</main>
 
-        <footer className="border-t border-slate-200 bg-slate-50">
-          <div className="mx-auto max-w-6xl px-4 py-10 sm:px-6">
-            <div className="grid gap-8 sm:grid-cols-3">
+        <footer className="bg-navy-950 text-slate-300">
+          <div className="mx-auto max-w-6xl px-4 py-12 sm:px-6">
+            {/* Footer CTA */}
+            <div className="flex flex-col items-start justify-between gap-5 rounded-3xl bg-white/[0.06] px-6 py-7 ring-1 ring-white/10 sm:flex-row sm:items-center">
+              <div>
+                <p className="text-xl font-extrabold tracking-tight text-white sm:text-2xl">
+                  Know what you actually take home.
+                </p>
+                <p className="mt-1 text-sm text-slate-400">
+                  Free 2026 paycheck calculator — federal, FICA, and state tax for
+                  all 50 states. No sign-up, nothing leaves your browser.
+                </p>
+              </div>
+              <a
+                href="/#calculator"
+                className="shrink-0 rounded-full bg-white px-5 py-3 text-sm font-extrabold text-navy-900 shadow-lg transition hover:bg-beam-100"
+              >
+                Calculate my paycheck →
+              </a>
+            </div>
+
+            <div className="mt-12 grid gap-8 sm:grid-cols-3">
               <div>
                 <div className="flex items-center gap-2.5">
                   <LogoMark />
-                  <span className="text-base font-extrabold tracking-tight text-slate-900">
-                    Paycheck<span className="text-blue-600">Beam</span>
+                  <span className="text-base font-extrabold tracking-tight text-white">
+                    Paycheck<span className="text-beam-300">Beam</span>
                   </span>
                 </div>
-                <p className="mt-3 text-sm leading-relaxed text-slate-500">
+                <p className="mt-3 text-sm leading-relaxed text-slate-400">
                   Free paycheck and take-home pay calculator for all 50 states,
                   using the official 2026 federal withholding tables.
                 </p>
               </div>
               <div>
-                <p className="text-sm font-bold text-slate-900">Popular calculators</p>
+                <p className="text-sm font-bold text-white">Popular calculators</p>
                 <ul className="mt-3 space-y-2 text-sm">
                   <li>
-                    <Link href="/texas-paycheck-calculator" className="text-slate-600 hover:text-blue-600">
+                    <Link href="/texas-paycheck-calculator" className="text-slate-400 transition hover:text-white">
                       Texas paycheck calculator
                     </Link>
                   </li>
                   <li>
-                    <Link href="/california-paycheck-calculator" className="text-slate-600 hover:text-blue-600">
+                    <Link href="/california-paycheck-calculator" className="text-slate-400 transition hover:text-white">
                       California paycheck calculator
                     </Link>
                   </li>
                   <li>
-                    <Link href="/florida-paycheck-calculator" className="text-slate-600 hover:text-blue-600">
+                    <Link href="/florida-paycheck-calculator" className="text-slate-400 transition hover:text-white">
                       Florida paycheck calculator
                     </Link>
                   </li>
                   <li>
-                    <Link href="/new-york-paycheck-calculator" className="text-slate-600 hover:text-blue-600">
+                    <Link href="/new-york-paycheck-calculator" className="text-slate-400 transition hover:text-white">
                       New York paycheck calculator
                     </Link>
                   </li>
                 </ul>
               </div>
               <div>
-                <p className="text-sm font-bold text-slate-900">Site</p>
+                <p className="text-sm font-bold text-white">Site</p>
                 <ul className="mt-3 space-y-2 text-sm">
                   <li>
-                    <Link href="/about" className="text-slate-600 hover:text-blue-600">
+                    <Link href="/about" className="text-slate-400 transition hover:text-white">
                       About &amp; methodology
                     </Link>
                   </li>
                   <li>
-                    <Link href="/contact" className="text-slate-600 hover:text-blue-600">
+                    <Link href="/contact" className="text-slate-400 transition hover:text-white">
                       Contact
                     </Link>
                   </li>
                   <li>
-                    <Link href="/privacy" className="text-slate-600 hover:text-blue-600">
+                    <Link href="/privacy" className="text-slate-400 transition hover:text-white">
                       Privacy policy
                     </Link>
                   </li>
                 </ul>
               </div>
             </div>
-            <div className="mt-10 border-t border-slate-200 pt-6 text-xs leading-relaxed text-slate-500">
+            <div className="mt-12 border-t border-white/10 pt-6 text-xs leading-relaxed text-slate-400">
               <p>
                 © 2026 PaycheckBeam. All rights reserved. PaycheckBeam provides
                 estimates for informational purposes only and is not tax, legal, or

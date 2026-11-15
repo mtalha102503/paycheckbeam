@@ -13,12 +13,62 @@
      system stack keeps builds (local + Vercel) dependency-free. */
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
     Helvetica, Arial, sans-serif;
+
+  /* PaycheckBeam navy scale — deep navy hero / footer, blue accent. */
+  --color-navy-950: #060f24;
+  --color-navy-900: #0a1f44;
+  --color-navy-800: #10294f;
+  --color-navy-700: #16356a;
+  --color-navy-600: #1d4482;
+  --color-beam-100: #dbeafe;
+  --color-beam-300: #93b8f5;
+  --color-beam-400: #5b8def;
+  --color-beam-500: #2f6df6;
+  --color-beam-600: #2563eb;
+  --color-mist-50: #f6f9fd;
 }
 
 /* PaycheckBeam is light-only by design — no dark-mode override. */
+
+html {
+  scroll-behavior: smooth;
+}
 
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+}
+
+::selection {
+  background: #bfdbfe;
+  color: #0a1f44;
+}
+
+/* Subtle dot texture for the navy hero — light blue dots, low opacity. */
+.bg-hero-dots {
+  background-image: radial-gradient(
+    rgba(147, 184, 245, 0.22) 1px,
+    transparent 1.5px
+  );
+  background-size: 22px 22px;
+}
+
+/* Faint blueprint grid for the navy hero. */
+.bg-hero-grid {
+  background-image:
+    linear-gradient(rgba(147, 184, 245, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(147, 184, 245, 0.08) 1px, transparent 1px);
+  background-size: 44px 44px;
+}
+
+/* Deep-navy hero gradient: near-black navy at the top, blue at the base. */
+.bg-hero-navy {
+  background:
+    radial-gradient(
+      60rem 30rem at 85% -10%,
+      rgba(47, 109, 246, 0.45),
+      transparent 60%
+    ),
+    linear-gradient(180deg, #060f24 0%, #0a1f44 55%, #10294f 100%);
 }

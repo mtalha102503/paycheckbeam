@@ -1,6 +1,9 @@
 import Link from "next/link";
 import PaycheckCalculator from "@/components/PaycheckCalculator";
-import { STATE_TAX_DATA, VERIFIED_STATE_COUNT, TODO_STATE_COUNT, topRatePct } from "@/lib/stateTaxData";
+import StateDirectory from "@/components/StateDirectory";
+import FaqAccordion from "@/components/FaqAccordion";
+import TrustStrip from "@/components/TrustStrip";
+import { VERIFIED_STATE_COUNT, TODO_STATE_COUNT } from "@/lib/stateTaxData";
 import {
   FEDERAL_BRACKETS_2026,
   STANDARD_DEDUCTION_2026,
@@ -18,7 +21,7 @@ function BracketTable({
   return (
     <div>
       <h3 className="text-base font-bold text-slate-900">{title}</h3>
-      <div className="mt-3 overflow-x-auto rounded-lg border border-slate-200">
+      <div className="mt-3 overflow-x-auto rounded-2xl border border-slate-200 bg-white shadow-sm">
         <table className="w-full text-sm">
           <caption className="sr-only">
             2026 federal income tax brackets, {title}
@@ -54,6 +57,29 @@ function BracketTable({
   );
 }
 
+function Eyebrow({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="text-xs font-extrabold uppercase tracking-[0.18em] text-blue-600">
+      {children}
+    </p>
+  );
+}
+
+function CheckIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" className={className} aria-hidden="true">
+      <circle cx="10" cy="10" r="10" fill="currentColor" opacity="0.16" />
+      <path
+        d="M6 10.2 8.8 13 14 7.5"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 const FAQS = [
   {
     q: "How accurate is this paycheck calculator?",
@@ -61,7 +87,15 @@ const FAQS = [
   },
   {
     q: "Does 401(k) lower my Social Security and Medicare tax?",
-    a: "No. Traditional 401(k) contributions lower your federal (and usually state) income tax, but they are still subject to Social Security and Medicare taxes. Health-insurance premiums paid through a cafeteria (Section 125) plan lower both income tax and FICA — and this calculator models that difference.",
+    a: "No. Traditional 401(k) contributions lower your federal income tax, but they are still subject to Social Security and Medicare taxes. Health-insurance premiums paid through a cafeteria (Section 125) plan lower both income tax and FICA — and this calculator models that difference. For state tax, most states follow the federal treatment, but Pennsylvania taxes 401(k) contributions, New Jersey taxes Section 125 premiums, FSAs and HSAs (but not 401(k)), and California taxes HSAs — the calculator applies each state's own verified rule.",
+  },
+  {
+    q: "What is California SDI, and why does it lower my take-home pay?",
+    a: "California's State Disability Insurance is a mandatory 1.3% payroll deduction in 2026 with no wage ceiling — $975 a year on a $75,000 salary. It is separate from California income tax and funds disability and Paid Family Leave benefits. Other states have their own versions (New York Paid Family Leave, New Jersey TDI and Family Leave, Washington PFML, and more) — the calculator deducts each program it has verified from an official state source, as its own line in your results.",
+  },
+  {
+    q: "Does the calculator include overtime?",
+    a: "Yes. Turn on overtime, enter your overtime hours per pay period and the multiplier (1.5× is the FLSA time-and-a-half default). Salaried workers get an hourly rate worked out from salary ÷ hours per week ÷ 52. When overtime is off, your gross pay counts straight time only and the results say so.",
   },
   {
     q: "Why is my state estimate missing for some states?",
@@ -77,90 +111,150 @@ const FAQS = [
   },
 ];
 
+const STEPS = [
+  {
+    n: "1",
+    t: "Annualize your pay",
+    d: "Your per-period wage is multiplied out to a full year — daily × 260 working days, weekly × 52, biweekly × 26, twice a month × 24, monthly × 12, quarterly × 4, twice a year × 2, annually × 1. Overtime hours are added at your multiplier (default 1.5×).",
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5" aria-hidden="true">
+        <rect x="3" y="4" width="18" height="17" rx="2" />
+        <path d="M16 2v4M8 2v4M3 9h18" />
+      </svg>
+    ),
+  },
+  {
+    n: "2",
+    t: "Subtract what isn't taxed",
+    d: "Pre-tax 401(k), health and other deductions come off first — using each state's own rules for what counts (Pennsylvania taxes 401(k) contributions, New Jersey taxes Section 125 items, California taxes HSAs) — then the 2026 standard deduction ($16,100 single, $32,200 married filing jointly, $24,150 head of household).",
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5" aria-hidden="true">
+        <circle cx="12" cy="12" r="9" />
+        <path d="M8 12h8" />
+      </svg>
+    ),
+  },
+  {
+    n: "3",
+    t: "Apply the 2026 brackets",
+    d: "The remainder runs through the graduated federal brackets (10%–37%), Social Security at 6.2% up to $184,500, Medicare at 1.45% plus 0.9% over $200,000 for every filing status, your state tax, and state payroll programs like California SDI — then back down to one paycheck.",
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5" aria-hidden="true">
+        <path d="M3 3v18h18" />
+        <path d="m7 14 4-4 3 3 5-6" />
+      </svg>
+    ),
+  },
+];
+
 export default function Home() {
   return (
     <div>
-      {/* Hero */}
-      <section className="border-b border-slate-200 bg-white">
-        <div className="mx-auto max-w-6xl px-4 pb-10 pt-10 sm:px-6 sm:pt-14">
-          <p className="text-sm font-bold uppercase tracking-wide text-blue-600">
+      {/* Hero — deep navy, dot + grid texture */}
+      <section className="bg-hero-navy relative overflow-hidden">
+        <div className="bg-hero-grid pointer-events-none absolute inset-0" aria-hidden="true" />
+        <div className="bg-hero-dots pointer-events-none absolute inset-0 opacity-60" aria-hidden="true" />
+        <div className="relative mx-auto max-w-6xl px-4 pb-28 pt-12 sm:px-6 sm:pt-16">
+          <p className="text-xs font-extrabold uppercase tracking-[0.18em] text-beam-300">
             2026 · IRS Pub 15-T tables
           </p>
-          <h1 className="mt-2 max-w-3xl text-4xl font-extrabold leading-tight tracking-tight text-slate-900 sm:text-5xl">
-            Paycheck Calculator: see your real take-home pay
+          <h1 className="mt-3 max-w-3xl text-4xl font-extrabold leading-[1.08] tracking-tight text-white sm:text-5xl">
+            See your real{" "}
+            <span className="text-beam-300">take-home pay</span>
           </h1>
-          <p className="mt-4 max-w-2xl text-lg leading-relaxed text-slate-600">
+          <p className="mt-4 max-w-2xl text-lg leading-relaxed text-slate-300">
             Enter your pay and state. We apply the official 2026 federal
             withholding tables, Social Security, Medicare, and your state&apos;s
-            income tax — and show exactly what lands in your bank account, per
+            income tax — and show your estimated take-home pay, per
             paycheck and per year.
           </p>
-          <div className="mt-8">
-            <PaycheckCalculator />
-          </div>
-          <p className="mt-4 text-sm text-slate-500">
-            Free · No sign-up · Nothing you type leaves your browser ·{" "}
-            {TODO_STATE_COUNT > 0
-              ? `${VERIFIED_STATE_COUNT} states with verified 2026 rates, ${TODO_STATE_COUNT} more being verified against official sources.`
-              : `All ${VERIFIED_STATE_COUNT} states + DC with verified 2026 rates.`}
-          </p>
-        </div>
-      </section>
-
-      {/* How it works */}
-      <section className="mx-auto max-w-6xl px-4 py-12 sm:px-6">
-        <h2 className="text-2xl font-extrabold tracking-tight text-slate-900">
-          How your paycheck is calculated
-        </h2>
-        <div className="mt-6 grid gap-4 md:grid-cols-3">
-          {[
-            {
-              n: "1",
-              t: "Annualize your pay",
-              d: "Your per-period wage is multiplied out to a full year — weekly × 52, biweekly × 26, twice a month × 24, monthly × 12.",
-            },
-            {
-              n: "2",
-              t: "Subtract what isn't taxed",
-              d: "Pre-tax 401(k) and health-insurance premiums come off first, then the 2026 standard deduction ($16,100 single, $32,200 married filing jointly, $24,150 head of household).",
-            },
-            {
-              n: "3",
-              t: "Apply the 2026 brackets",
-              d: "The remainder runs through the graduated federal brackets (10%–37%), Social Security at 6.2% up to $184,500, Medicare at 1.45% plus 0.9% over $200,000, and your state tax — then back down to one paycheck.",
-            },
-          ].map((s) => (
-            <div
-              key={s.n}
-              className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
+          <ul className="mt-6 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm font-semibold text-slate-200">
+            <li className="flex items-center gap-2">
+              <CheckIcon className="h-5 w-5 text-emerald-400" />
+              Free
+            </li>
+            <li className="flex items-center gap-2">
+              <CheckIcon className="h-5 w-5 text-emerald-400" />
+              No sign-up
+            </li>
+            <li className="flex items-center gap-2">
+              <CheckIcon className="h-5 w-5 text-emerald-400" />
+              Private — runs in your browser
+            </li>
+          </ul>
+          <div className="mt-8 flex flex-wrap items-center gap-3">
+            <a
+              href="#calculator"
+              className="rounded-full bg-white px-5 py-3 text-sm font-extrabold text-navy-900 shadow-lg transition hover:bg-beam-100"
             >
-              <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-blue-600 text-sm font-bold text-white">
-                {s.n}
-              </span>
-              <h3 className="mt-3 text-base font-bold text-slate-900">{s.t}</h3>
-              <p className="mt-2 text-sm leading-relaxed text-slate-600">{s.d}</p>
-            </div>
-          ))}
+              Calculate my paycheck
+            </a>
+            <a
+              href="#states"
+              className="rounded-full px-5 py-3 text-sm font-bold text-white ring-1 ring-white/40 transition hover:bg-white/10 hover:ring-white/70"
+            >
+              See all states →
+            </a>
+          </div>
         </div>
       </section>
 
-      {/* Federal brackets */}
-      <section className="border-y border-slate-200 bg-slate-50">
-        <div className="mx-auto max-w-6xl px-4 py-12 sm:px-6">
-          <h2 className="text-2xl font-extrabold tracking-tight text-slate-900">
+      {/* Calculator — white card overlapping the hero */}
+      <div id="calculator" className="relative z-10 mx-auto -mt-20 max-w-6xl scroll-mt-24 px-4 sm:px-6">
+        <PaycheckCalculator />
+        <TrustStrip />
+        <p className="mt-4 text-center text-sm text-slate-500">
+          {TODO_STATE_COUNT > 0
+            ? `${VERIFIED_STATE_COUNT} states with verified 2026 rates, ${TODO_STATE_COUNT} more being verified against official sources.`
+            : `All 50 states + DC with verified 2026 rates.`}
+        </p>
+      </div>
+
+      {/* How it works — pale blue-grey */}
+      <section className="mt-16 bg-mist-50">
+        <div className="mx-auto max-w-6xl px-4 py-14 sm:px-6">
+          <Eyebrow>How it works</Eyebrow>
+          <h2 className="mt-2 text-2xl font-extrabold tracking-tight text-slate-900 sm:text-3xl">
+            How your paycheck is calculated
+          </h2>
+          <div className="mt-8 grid gap-4 md:grid-cols-3">
+            {STEPS.map((s) => (
+              <div
+                key={s.n}
+                className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
+              >
+                <span className="flex items-center gap-3">
+                  <span className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-blue-600 text-sm font-extrabold text-white ring-4 ring-blue-100">
+                    {s.n}
+                  </span>
+                  <span className="text-blue-600">{s.icon}</span>
+                </span>
+                <h3 className="mt-4 text-base font-bold text-slate-900">{s.t}</h3>
+                <p className="mt-2 text-sm leading-relaxed text-slate-600">{s.d}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* Federal brackets — white */}
+      <section>
+        <div className="mx-auto max-w-6xl px-4 py-14 sm:px-6">
+          <Eyebrow>2026 federal tables</Eyebrow>
+          <h2 className="mt-2 text-2xl font-extrabold tracking-tight text-slate-900 sm:text-3xl">
             2026 federal tax brackets
           </h2>
-          <p className="mt-2 max-w-3xl text-slate-600">
+          <p className="mt-3 max-w-3xl leading-relaxed text-slate-600">
             These are the official 2026 brackets from IRS Revenue Procedure
             2025-32. They apply to <em>taxable</em> income — what is left after
             the standard deduction — not to your gross salary. Only the dollars
             inside each bracket are taxed at that bracket&apos;s rate.
           </p>
-          <div className="mt-6 grid gap-6 md:grid-cols-2">
+          <div className="mt-8 grid gap-6 md:grid-cols-2">
             <BracketTable status="single" title="Single" />
             <BracketTable status="marriedFilingJointly" title="Married filing jointly" />
           </div>
-          <p className="mt-4 text-sm text-slate-500">
+          <p className="mt-5 text-sm text-slate-500">
             Standard deduction 2026: single ${STANDARD_DEDUCTION_2026.single.toLocaleString()} ·{" "}
             married filing jointly $
             {STANDARD_DEDUCTION_2026.marriedFilingJointly.toLocaleString()} · head of
@@ -170,57 +264,40 @@ export default function Home() {
         </div>
       </section>
 
-      {/* State directory */}
-      <section id="states" className="mx-auto max-w-6xl scroll-mt-20 px-4 py-12 sm:px-6">
-        <h2 className="text-2xl font-extrabold tracking-tight text-slate-900">
-          Paycheck calculator by state
-        </h2>
-        <p className="mt-2 max-w-3xl text-slate-600">
-          State income tax is the biggest reason two identical salaries take home
-          different pay. Pick your state for its 2026 rate, withholding notes,
-          and a calculator set to that state.
-        </p>
-        <div className="mt-6 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
-          {STATE_TAX_DATA.map((s) => (
-            <Link
-              key={s.slug}
-              href={`/${s.slug}`}
-              className="group rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm transition hover:border-blue-600 hover:shadow"
-            >
-              <span className="block text-sm font-bold text-slate-900 group-hover:text-blue-700">
-                {s.state}
-              </span>
-              <span className="mt-0.5 block text-xs text-slate-500">
-                {s.structure === "none"
-                  ? "No income tax"
-                  : s.structure === "flat" && s.flatRatePct !== null
-                    ? `Flat ${s.flatRatePct}%`
-                    : s.structure === "flat"
-                      ? "Flat rate — verifying"
-                      : `Graduated · top ${topRatePct(s)}%`}
-              </span>
-            </Link>
-          ))}
+      {/* State directory — pale blue-grey */}
+      <section id="states" className="scroll-mt-20 bg-mist-50">
+        <div className="mx-auto max-w-6xl px-4 py-14 sm:px-6">
+          <Eyebrow>By state</Eyebrow>
+          <h2 className="mt-2 text-2xl font-extrabold tracking-tight text-slate-900 sm:text-3xl">
+            Paycheck calculator by state
+          </h2>
+          <p className="mt-3 max-w-3xl leading-relaxed text-slate-600">
+            State income tax is the biggest reason two identical salaries take home
+            different pay. Pick your state for its 2026 rate, withholding notes,
+            and a calculator set to that state.
+          </p>
+          <div className="mt-8">
+            <StateDirectory />
+          </div>
         </div>
       </section>
 
-      {/* FAQ */}
-      <section className="border-t border-slate-200 bg-slate-50">
-        <div className="mx-auto max-w-6xl px-4 py-12 sm:px-6">
-          <h2 className="text-2xl font-extrabold tracking-tight text-slate-900">
+      {/* FAQ — white, real accordion */}
+      <section>
+        <div className="mx-auto max-w-6xl px-4 py-14 sm:px-6">
+          <Eyebrow>Questions</Eyebrow>
+          <h2 className="mt-2 text-2xl font-extrabold tracking-tight text-slate-900 sm:text-3xl">
             Frequently asked questions
           </h2>
-          <div className="mt-6 space-y-4">
-            {FAQS.map((f) => (
-              <div
-                key={f.q}
-                className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
-              >
-                <h3 className="text-base font-bold text-slate-900">{f.q}</h3>
-                <p className="mt-2 text-sm leading-relaxed text-slate-600">{f.a}</p>
-              </div>
-            ))}
+          <div className="mt-8">
+            <FaqAccordion faqs={FAQS} />
           </div>
+          <p className="mt-8 text-sm text-slate-500">
+            Still unsure?{" "}
+            <Link href="/about" className="font-semibold text-blue-600 hover:underline">
+              Read the full methodology →
+            </Link>
+          </p>
         </div>
       </section>
     </div>
