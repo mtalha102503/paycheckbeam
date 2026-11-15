@@ -4,7 +4,7 @@ import { ALL_STATE_SLUGS } from "@/lib/stateTaxData";
 
 export default function sitemap() {
   const now = new Date();
-  const staticRoutes = ["", "/about", "/contact", "/privacy", "/terms", "/disclaimer", "/cookies", "/blog", "/blog/how-to-read-a-pay-stub"];
+  const staticRoutes = ["", "/about", "/contact", "/privacy", "/terms", "/disclaimer", "/cookies", "/blog", "/blog/how-to-read-a-pay-stub", "/author/muhammad-talha"];
   return [
     ...staticRoutes.map((route) => ({
       url: `${SITE_URL}${route}`,

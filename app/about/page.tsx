@@ -19,6 +19,32 @@ export default function About() {
         federal income tax, Social Security, Medicare, and state income tax.
       </p>
 
+      <h2 className="mt-10 text-2xl font-bold text-slate-900">Who builds this</h2>
+      <div className="mt-4 flex gap-4 rounded-xl border border-slate-200 bg-slate-50 p-5">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src="/muhammad-talha.jpg"
+          alt="Muhammad Talha"
+          width={72}
+          height={72}
+          className="h-[72px] w-[72px] shrink-0 rounded-full object-cover"
+        />
+        <div>
+          <p className="font-bold text-slate-900">Muhammad Talha</p>
+          <p className="text-sm font-medium text-blue-700">Founder, HireSkys</p>
+          <p className="mt-1 text-sm leading-relaxed text-slate-600">
+            PaycheckBeam is built and maintained by Muhammad Talha, founder of
+            HireSkys — the remote-jobs platform behind this project.{" "}
+            <Link
+              href="/author/muhammad-talha"
+              className="font-semibold text-blue-700 hover:underline"
+            >
+              Read his author page →
+            </Link>
+          </p>
+        </div>
+      </div>
+
       <h2 className="mt-10 text-2xl font-bold text-slate-900">Methodology</h2>
       <p className="mt-3 leading-relaxed text-slate-600">
         Federal withholding follows the IRS Publication 15-T (2026) percentage

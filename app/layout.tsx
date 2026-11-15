@@ -19,6 +19,20 @@ export const metadata: Metadata = {
     title: `${SITE_NAME} — Paycheck Calculator & Take-Home Pay by State (2026)`,
     description:
       "Free 2026 paycheck calculator. Federal, FICA, and state withholding for all 50 states — see your real take-home pay in seconds.",
+    images: [
+      {
+        url: "/opengraph-image",
+        width: 1200,
+        height: 630,
+        alt: `${SITE_NAME} — Paycheck Calculator & Take-Home Pay by State (2026)`,
+      },
+    ],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: `${SITE_NAME} — Paycheck Calculator & Take-Home Pay by State (2026)`,
+    description:
+      "Free 2026 paycheck calculator. Federal, FICA, and state withholding for all 50 states — see your real take-home pay in seconds.",
   },
 };
 
@@ -95,6 +109,11 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
                   <li>
                     <Link href="/blog" className="text-slate-400 transition hover:text-white">
                       Blog
+                    </Link>
+                  </li>
+                  <li>
+                    <Link href="/author/muhammad-talha" className="text-slate-400 transition hover:text-white">
+                      About the author
                     </Link>
                   </li>
                   <li>
