@@ -23,11 +23,15 @@
  * withholding. A $225,000 MFJ salary therefore withholds 0.9% on the
  * $25,000 above $200,000 = $225/yr extra.
  *
- * Overtime: regular pay is annualized from the pay type; overtime is
- * overtime-hours-per-pay-period x periods x hourly rate x multiplier
- * (default 1.5x, FLSA). For salaried workers the hourly rate is derived
- * from salary / (hours per week x 52). When overtime is off, no overtime
- * is included and the UI says so ("overtime excluded").
+ * Overtime (FLSA time-and-a-half, no double-counting): overtime hours
+ * are the hours ABOVE 40/week. Regular pay covers total hours minus
+ * overtime hours at straight time; overtime pay is overtime hours x
+ * hourly rate x multiplier (default 1.5x). The overtime hours the user
+ * enters per pay period are capped at the hours above 40/week, so at
+ * 40 hours/week or fewer there can be no overtime. For salaried workers
+ * the hourly rate is derived from salary / (hours per week x 52). When
+ * overtime is off, no overtime is included and the UI says so
+ * ("overtime excluded").
  *
  * State income tax and state payroll-insurance programs are delegated to
  * the pluggable estimators in lib/stateTaxData.ts (injected so this module
@@ -220,6 +224,76 @@ export interface OvertimeInputs {
   multiplier: number;
 }
 
+/** Result of splitting gross pay into regular + overtime hours. */
+export interface OvertimeSplit {
+  /** Hourly rate used for overtime (hourly wage, or salary-derived). */
+  hourlyRate: number;
+  /** Regular hours per week after removing overtime hours. */
+  regularHoursPerWeek: number;
+  /** Effective overtime hours per week (capped at hours above 40/week). */
+  overtimeHoursPerWeek: number;
+  /** Annual regular gross (straight time only). */
+  annualRegularGross: number;
+  /** Annual overtime gross at rate x multiplier (full overtime pay). */
+  annualOvertimeGross: number;
+}
+
+/**
+ * Split gross pay into regular + overtime without double-counting.
+ *
+ * FLSA rule: overtime is the hours ABOVE 40 a week. The overtime hours
+ * the user enters per pay period are capped at those excess hours, so
+ * regular hours = total hours - overtime hours and overtime pay =
+ * overtime hours x hourly rate x multiplier. At 40 hours/week or fewer
+ * there can be no overtime hours, whatever the user typed.
+ *
+ * Example: $25/hr, 45 hrs/week, 10 OT hrs per biweekly period, 1.5x:
+ * regular = 40 x $25 x 52 = $52,000; overtime = 5 x $37.50 x 52 = $9,750;
+ * gross = $61,750 (NOT $68,250 — the old code counted the 5 OT hours
+ * once at straight time inside the 45-hour base AND again at full 1.5x).
+ */
+export function splitOvertime(
+  payType: PayType,
+  amount: number,
+  hoursPerWeek: number,
+  overtime: OvertimeInputs,
+  periodsPerYear: number,
+): OvertimeSplit {
+  const hourlyRate =
+    payType === "hourly"
+      ? amount
+      : hoursPerWeek > 0
+        ? amount / (hoursPerWeek * 52)
+        : 0;
+  const enteredOtHoursPerWeek = overtime.enabled
+    ? (overtime.hoursPerPeriod * periodsPerYear) / 52
+    : 0;
+  const maxOtHoursPerWeek = Math.max(0, hoursPerWeek - 40);
+  const overtimeHoursPerWeek = Math.min(
+    enteredOtHoursPerWeek,
+    maxOtHoursPerWeek,
+  );
+  const regularHoursPerWeek = Math.max(
+    0,
+    hoursPerWeek - overtimeHoursPerWeek,
+  );
+  // Salaried workers with no overtime: the salary IS the annual regular
+  // gross (avoids float drift from rate x hours x 52).
+  const annualRegularGross =
+    payType === "salary" && overtimeHoursPerWeek === 0
+      ? amount
+      : regularHoursPerWeek * hourlyRate * 52;
+  const annualOvertimeGross =
+    overtimeHoursPerWeek * hourlyRate * overtime.multiplier * 52;
+  return {
+    hourlyRate,
+    regularHoursPerWeek,
+    overtimeHoursPerWeek,
+    annualRegularGross,
+    annualOvertimeGross,
+  };
+}
+
 export interface PaycheckInputs {
   payType: PayType;
   /** Annual salary (payType "salary") OR hourly rate (payType "hourly"). */
@@ -319,25 +393,16 @@ export function calculatePaycheck(
 ): PaycheckBreakdown {
   const periods = PERIODS_PER_YEAR[inputs.frequency];
 
-  const annualRegularGross =
-    inputs.payType === "hourly"
-      ? inputs.amount * inputs.hoursPerWeek * 52
-      : inputs.amount;
-
-  // Hourly rate for overtime: the hourly wage, or salary derived hourly.
-  const hourlyRate =
-    inputs.payType === "hourly"
-      ? inputs.amount
-      : inputs.hoursPerWeek > 0
-        ? inputs.amount / (inputs.hoursPerWeek * 52)
-        : 0;
-
-  const annualOvertimeGross = inputs.overtime.enabled
-    ? inputs.overtime.hoursPerPeriod *
-      periods *
-      hourlyRate *
-      inputs.overtime.multiplier
-    : 0;
+  // Regular + overtime split (FLSA, no double-counting — see splitOvertime).
+  const otSplit = splitOvertime(
+    inputs.payType,
+    inputs.amount,
+    inputs.hoursPerWeek,
+    inputs.overtime,
+    periods,
+  );
+  const annualRegularGross = otSplit.annualRegularGross;
+  const annualOvertimeGross = otSplit.annualOvertimeGross;
 
   const annualGross = annualRegularGross + annualOvertimeGross;
 

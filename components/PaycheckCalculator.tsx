@@ -7,6 +7,7 @@ import {
   formatUSD,
   formatUSD0,
   hourlyToAnnual,
+  splitOvertime,
   validatePaycheckInputs,
   type FilingStatus,
   type NyLocalOption,
@@ -276,14 +277,29 @@ export default function PaycheckCalculator({ defaultStateSlug }: Props) {
   const amount = payType === "salary" ? num(salaryAmount, 0) : num(hourlyRate, 0);
   const hrs = num(hoursPerWeek, 40);
   const periods = PERIODS_PER_YEAR[frequency];
-  const regularAnnual =
-    payType === "hourly" ? amount * hrs * 52 : amount;
-  const hourlyRateNum =
-    payType === "hourly" ? amount : hrs > 0 ? amount / (hrs * 52) : 0;
-  const otAnnual = otEnabled
-    ? num(otHours, 0) * periods * hourlyRateNum * num(otMultiplier, 1.5)
-    : 0;
+  // Regular + overtime split (FLSA, no double-counting — same helper as
+  // the engine, so the panel and the result can never disagree).
+  const otSplit = splitOvertime(
+    payType,
+    amount,
+    hrs,
+    {
+      enabled: otEnabled,
+      hoursPerPeriod: num(otHours, 0),
+      multiplier: num(otMultiplier, 1.5),
+    },
+    periods,
+  );
+  const hourlyRateNum = otSplit.hourlyRate;
+  const regularAnnual = otSplit.annualRegularGross;
+  const otAnnual = otSplit.annualOvertimeGross;
   const annualGross = regularAnnual + otAnnual;
+  // Overtime hours the user typed, per week — vs the hours that actually
+  // count (capped at hours above 40/week).
+  const enteredOtHoursPerWeek = otEnabled ? (num(otHours, 0) * periods) / 52 : 0;
+  const otHoursClamped =
+    enteredOtHoursPerWeek - otSplit.overtimeHoursPerWeek > 0.001;
+  const otRate = hourlyRateNum * num(otMultiplier, 1.5);
 
   // Pre-tax annual amounts ($ fixed, or % of annual gross).
   const preTaxById = useMemo(() => {
@@ -430,14 +446,16 @@ export default function PaycheckCalculator({ defaultStateSlug }: Props) {
               pct: pctOfGross(result.annualRegularGross),
             },
             {
-              label: `Overtime (${num(otMultiplier, 1.5)}×)`,
+              label: `Overtime (${num(otMultiplier, 1.5)}× · ${formatUSD(otRate)}/hr)`,
               value: formatUSD(val(result.perPeriodOvertimeGross, result.annualOvertimeGross)),
               pct: pctOfGross(result.annualOvertimeGross),
             },
           ]
         : undefined,
       note: otEnabled
-        ? undefined
+        ? result.annualOvertimeGross > 0
+          ? `Includes a ${formatUSD((result.annualOvertimeGross * (num(otMultiplier, 1.5) - 1)) / num(otMultiplier, 1.5))}/yr time-and-a-half premium above straight time.`
+          : "Overtime is on, but you work 40 hours or fewer a week, so there are no overtime hours."
         : "Overtime excluded — enable it below to include overtime pay.",
     },
     {
@@ -861,12 +879,22 @@ export default function PaycheckCalculator({ defaultStateSlug }: Props) {
                     <p className="text-xs leading-relaxed text-slate-500">
                       Default 1.5× is the FLSA time-and-a-half rate for hours
                       over 40 a week. Overtime is paid at{" "}
-                      {formatUSD(hourlyRateNum)}/hr
+                      {formatUSD(otRate)}/hr ({formatUSD(hourlyRateNum)} ×{" "}
+                      {num(otMultiplier, 1.5)}×)
                       {payType === "salary"
-                        ? " (worked out from your salary ÷ hours/week ÷ 52)"
+                        ? " — hourly rate worked out from your salary ÷ hours/week ÷ 52"
                         : ""}
-                      .
+                      . Enter the overtime hours only — the hours above 40 a
+                      week; regular pay already covers the first 40.
                     </p>
+                    {otHoursClamped && (
+                      <p className="text-xs leading-relaxed font-semibold text-amber-700">
+                        Only {otSplit.overtimeHoursPerWeek.toFixed(1)} of the{" "}
+                        {enteredOtHoursPerWeek.toFixed(1)} overtime hrs/week
+                        you entered count — overtime is the hours above 40 a
+                        week.
+                      </p>
+                    )}
                   </>
                 ) : (
                   <p className="text-xs leading-relaxed text-slate-500">
