@@ -13,9 +13,10 @@
  * $304,850, then 2.5%), so the North Dakota rows now match the
  * calculator with no flags. Utah's enacted 2026 rate is 4.45%
  * (S.B. 60, signed Mar 23, 2026, retroactive Jan 1, 2026) and was
- * also applied — but the $966 taxpayer tax credit still phases out
- * at higher incomes and the calculator applies it in full, so every
- * Utah row below is still flagged "Partial calculation".
+ * also applied — and the $966 taxpayer tax credit phaseout is now
+ * modelled in the engine (Utah Code §59-10-1018: −1.3% per dollar
+ * of Utah taxable income over $18,696 single / $28,045 HoH /
+ * $37,392 joint for 2026), so the Utah rows are complete.
  * Idaho's 0% band ($4,811 single) is the latest published threshold
  * (2025); the 2026 threshold had not been published when researched.
  */
@@ -917,45 +918,45 @@ function UtahContent() {
       <section className="mx-auto max-w-6xl px-4 pb-14 sm:px-6">
         <Eyebrow>Worked examples · single filer, wages only</Eyebrow>
         <SectionTitle>
-          Utah tax at real salaries — partial, because the 2026 credit
-          phaseout isn&apos;t in the calculator yet
+          Utah tax at real salaries — with the 2026 credit phaseout
+          applied
         </SectionTitle>
         <Para>
           Utah&apos;s rate for 2026 is 4.45%, cut from 4.5% by Senate Bill
           60 in the 2026 session. These rows are shown at the 4.45% rate
-          with the full taxpayer tax credit applied — and they are
-          <strong> partial calculations</strong>: the credit actually phases
-          out at higher incomes (see the note below), so the true liability
-          is higher than the number in the table, not lower. Use these rows
-          as a floor, not a final answer.
+          with the taxpayer tax credit after its phaseout: the credit
+          shrinks by 1.3% of Utah taxable income above $18,696 for a
+          single filer in 2026, so the effective rate rises with income
+          and the credit is fully gone by about $93,004 of taxable
+          income.
         </Para>
         <NoteBox tone="amber">
-          <strong>Why these rows are partial:</strong> one thing is not
-          yet modelled. The taxpayer tax credit phases out at a rate of
-          1.3% of income above a low threshold, so the full credit shown
-          here does not survive at higher incomes. The rate in the table
-          is the enacted 4.45% (S.B. 60, Laws of Utah 2026, Chapter
-          250); the credit phaseout is the remaining gap. The direction
-          is clear: the true 2026 liability is higher than the table
-          shows at every income above the phaseout threshold.
+          <strong>Why the effective rate rises with income:</strong> the
+          taxpayer tax credit phases out at a rate of 1.3% of Utah
+          taxable income above $18,696 for a single filer in 2026
+          ($28,045 head of household, $37,392 joint), so the credit
+          shown here shrinks as income rises and reaches $0 at about
+          $93,004 of taxable income. The rate in the table is the
+          enacted 4.45% (S.B. 60, Laws of Utah 2026, Chapter 250).
         </NoteBox>
         <WorkedTable
-          caption="Utah income tax, single filer, 2026 — partial calculation"
+          caption="Utah income tax, single filer, 2026"
           headers={["Gross wages", "UT taxable income", "UT income tax"]}
           rows={utRows}
-          partialRowIndexes={[0, 1, 2]}
-          footnote={`The $60,000 row shows an effective rate of ${effectiveRatePct(EX_UT_60.annualState, 60000)}% of gross, and the $150,000 row ${effectiveRatePct(EX_UT_150.annualState, 150000)}% — both understate the true liability because of the unmodelled credit phaseout. Every row is generated from the same calculation the calculator above runs, so the figures match the tool; they are flagged partial because the credit phaseout is not modelled.`}
+          footnote={`The $60,000 row shows an effective rate of ${effectiveRatePct(EX_UT_60.annualState, 60000)}% of gross, and the $150,000 row ${effectiveRatePct(EX_UT_150.annualState, 150000)}% — the rate rises because the taxpayer tax credit phases out with income. Every row is generated from the same calculation the calculator above runs, so the figures match the tool.`}
         />
         <Para>
           The $60,000 row in detail: Utah starts from federal adjusted
           gross income, not federal taxable income, and Utah has no state
           standard deduction — so the middle column is the full $60,000 of
-          gross wages, and the taxpayer tax credit of $966 for a single
-          filer is subtracted from the tax itself, not from income. At the
-          4.45% rate the computation is 4.45% × {formatUSD0(stateTaxableIncome(UT_SLUG, 60000))} ={" "}
-          {formatUSD(0.0445 * stateTaxableIncome(UT_SLUG, 60000))}, minus the $966 credit ={" "}
-          {formatAmountOrUnavailable(EX_UT_60.annualState)}. With the phaseout applied, the credit shrinks and the
-          liability rises.
+          gross wages, and the taxpayer tax credit is subtracted from the
+          tax itself, not from income. At the 4.45% rate the computation
+          is 4.45% × {formatUSD0(stateTaxableIncome(UT_SLUG, 60000))} ={" "}
+          {formatUSD(0.0445 * stateTaxableIncome(UT_SLUG, 60000))}, minus the phased credit of{" "}
+          {formatUSD(0.0445 * stateTaxableIncome(UT_SLUG, 60000) - (EX_UT_60.annualState ?? 0))} ={" "}
+          {formatAmountOrUnavailable(EX_UT_60.annualState)}. The full $966 credit is reduced by 1.3% of Utah
+          taxable income above $18,696 for a single filer in 2026, so at
+          $150,000 it is fully gone and the tax is the full 4.45%.
         </Para>
       </section>
 
@@ -980,12 +981,13 @@ function UtahContent() {
           its place is the taxpayer tax credit, worth 6% of the federal
           standard deduction — $966 for a single filer in 2026 ($1,932
           joint) — plus 6% of the personal exemption for each dependent.
-          The credit phases out at 1.3% of income above a low threshold
-          (the 2025 threshold was $18,213), and it is reduced by any Utah
-          EITC, child tax credit, at-home parent credit, or Social Security
-          benefits credit you claim. The phaseout is why the worked
-          examples above are partial: at higher incomes the credit is
-          mostly or entirely gone.
+          The credit phases out at 1.3% of Utah taxable income above
+          $18,696 for a single filer in 2026 ($28,045 head of household,
+          $37,392 joint), and it is reduced by any Utah EITC, child tax
+          credit, at-home parent credit, or Social Security benefits
+          credit you claim. The worked examples above apply that
+          phaseout: at higher incomes the credit is mostly or entirely
+          gone — at $150,000 for a single filer it is $0.
         </Para>
         <Para>
           Utah has no reciprocity agreement with any state, so a Utah
@@ -1753,19 +1755,19 @@ export const BATCH_FAQS: Record<string, FaqItem[]> = {
   [UT_SLUG]: [
     {
       q: "How much Utah income tax do I pay on a $60,000 salary?",
-      a: `The calculator shows about ${formatAmountOrUnavailable(EX_UT_60.annualState)} a year — an effective rate of ${effectiveRatePct(EX_UT_60.annualState, 60000)}% of gross pay — but treat that as a floor, not a final answer. It is a partial calculation: the rate used is the enacted 4.45%, but the full $966 taxpayer tax credit is applied, even though the credit phases out at higher incomes. The true 2026 liability is higher than the figure shown.`,
+      a: `The calculator shows about ${formatAmountOrUnavailable(EX_UT_60.annualState)} a year — an effective rate of ${effectiveRatePct(EX_UT_60.annualState, 60000)}% of gross pay. That figure already includes the taxpayer tax credit after its phaseout: at $60,000 the credit is ${formatUSD(0.0445 * stateTaxableIncome(UT_SLUG, 60000) - (EX_UT_60.annualState ?? 0))}, not the full $966, because the credit shrinks by 1.3% of Utah taxable income above $18,696 for a single filer.`,
     },
     {
       q: "What is Utah's income tax rate for 2026?",
       a: "4.45% — cut from 4.5% by Senate Bill 60 in the 2026 session, signed March 23, 2026 and retroactive to tax years beginning on or after January 1, 2026. The Tax Commission's own rates page still lists 4.5%, but that page is stale against the enacted statute. The rate has been cut every year since 2022: 4.85%, 4.65%, 4.55%, 4.5%, and now 4.45%.",
     },
     {
-      q: "Why are the Utah examples on this page partial calculations?",
-      a: "One thing is not yet in the calculator: the taxpayer tax credit phases out at 1.3% of income above a low threshold, so the full credit does not survive at higher incomes. The rate in the table is the enacted 4.45% (S.B. 60). The true 2026 liability is higher than the table shows at every income above the phaseout threshold.",
+      q: "Does the Utah calculator apply the taxpayer tax credit phaseout?",
+      a: `Yes — the credit is reduced by 1.3% of Utah taxable income above $18,696 for a single filer in 2026 ($28,045 head of household, $37,392 joint), reaching $0 at about $93,004 of taxable income. At $150,000 for a single filer the credit is fully phased out, so the tax is the full 4.45% — ${formatAmountOrUnavailable(EX_UT_150.annualState)} a year.`,
     },
     {
       q: "What is Utah's taxpayer tax credit?",
-      a: "A credit worth 6% of the federal standard deduction — $966 for a single filer in 2026 ($1,932 joint) — plus 6% of the personal exemption for each dependent. It phases out at 1.3% of income above a low threshold, and it is reduced by any Utah EITC, child tax credit, at-home parent credit, or Social Security benefits credit you claim.",
+      a: "A credit worth 6% of the federal standard deduction — $966 for a single filer in 2026 ($1,932 joint) — plus 6% of the personal exemption for each dependent. It phases out at 1.3% of Utah taxable income above $18,696 for a single filer in 2026 ($28,045 head of household, $37,392 joint), and it is reduced by any Utah EITC, child tax credit, at-home parent credit, or Social Security benefits credit you claim.",
     },
     {
       q: "Is there a Utah withholding form?",

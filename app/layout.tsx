@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import "./globals.css";
 import { SITE_URL, SITE_NAME } from "@/lib/site";
+import SiteHeader, { LogoMark } from "@/components/SiteHeader";
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
@@ -21,61 +22,11 @@ export const metadata: Metadata = {
   },
 };
 
-function LogoMark() {
-  return (
-    <svg width="28" height="28" viewBox="0 0 28 28" fill="none" aria-hidden="true">
-      <rect width="28" height="28" rx="7" fill="#2563eb" />
-      <path
-        d="M15.5 5 8 15.5h5L12.5 23 20 12.5h-5l.5-7.5Z"
-        fill="#fff"
-        stroke="#fff"
-        strokeWidth="1"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html lang="en" className="h-full antialiased">
       <body className="flex min-h-full flex-col bg-white font-sans text-slate-900">
-        <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/95 backdrop-blur">
-          <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:px-6">
-            <Link href="/" className="flex items-center gap-2.5">
-              <LogoMark />
-              <span className="text-lg font-extrabold tracking-tight text-slate-900">
-                Paycheck<span className="text-blue-600">Beam</span>
-              </span>
-            </Link>
-            <nav className="flex items-center gap-1 text-sm font-semibold sm:gap-2">
-              <Link
-                href="/"
-                className="rounded-lg px-3 py-2 text-slate-700 hover:bg-slate-100 hover:text-slate-900"
-              >
-                Calculator
-              </Link>
-              <Link
-                href="/#states"
-                className="rounded-lg px-3 py-2 text-slate-700 hover:bg-slate-100 hover:text-slate-900"
-              >
-                States
-              </Link>
-              <Link
-                href="/about"
-                className="hidden rounded-lg px-3 py-2 text-slate-700 hover:bg-slate-100 hover:text-slate-900 sm:block"
-              >
-                About
-              </Link>
-              <Link
-                href="/#calculator"
-                className="ml-1 rounded-full bg-blue-600 px-4 py-2 text-sm font-bold text-white shadow-sm transition hover:bg-blue-700"
-              >
-                Calculate
-              </Link>
-            </nav>
-          </div>
-        </header>
+        <SiteHeader />
 
         <main className="flex-1">{children}</main>
 
@@ -142,6 +93,11 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
                 <p className="text-sm font-bold text-white">Site</p>
                 <ul className="mt-3 space-y-2 text-sm">
                   <li>
+                    <Link href="/blog" className="text-slate-400 transition hover:text-white">
+                      Blog
+                    </Link>
+                  </li>
+                  <li>
                     <Link href="/about" className="text-slate-400 transition hover:text-white">
                       About &amp; methodology
                     </Link>
@@ -154,6 +110,21 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
                   <li>
                     <Link href="/privacy" className="text-slate-400 transition hover:text-white">
                       Privacy policy
+                    </Link>
+                  </li>
+                  <li>
+                    <Link href="/terms" className="text-slate-400 transition hover:text-white">
+                      Terms of service
+                    </Link>
+                  </li>
+                  <li>
+                    <Link href="/disclaimer" className="text-slate-400 transition hover:text-white">
+                      Disclaimer
+                    </Link>
+                  </li>
+                  <li>
+                    <Link href="/cookies" className="text-slate-400 transition hover:text-white">
+                      Cookie policy
                     </Link>
                   </li>
                 </ul>
